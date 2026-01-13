@@ -15,8 +15,6 @@ Download the latest release of the plugin and save it to a location the Traefik 
 #### `docker-compose.yml`
 
 ```yml
-version: "3.7"
-
 services:
   traefik:
     image: traefik
@@ -135,7 +133,6 @@ http:
 And some example docker file for traefik:
 
 ```yml
-version: "3"
 networks:
   proxy:
     external: true # specifies that this network has been created outside of Compose, raises an error if it doesn’t exist
