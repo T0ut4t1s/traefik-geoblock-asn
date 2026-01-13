@@ -6,7 +6,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./../traefik-config/traefik.yml:/etc/traefik/traefik.yml
       - ./../traefik-config/dynamic-configuration.yml:/etc/traefik/dynamic-configuration.yml
-      - ./../../../geoblock:/plugins-local/src/github.com/PascalMinder/geoblock
+      - ./../../../traefik-geoblock-asn:/plugins-local/src/github.com/T0ut4t1s/traefik-geoblock-asn
       - ./../log:/log
       - ./../log/geoblock:/geoblock
 

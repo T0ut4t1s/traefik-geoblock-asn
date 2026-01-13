@@ -4,7 +4,7 @@ log:
 experimental:
   localPlugins:
     geoblock:
-      moduleName: github.com/PascalMinder/geoblock
+      moduleName: github.com/T0ut4t1s/traefik-geoblock-asn
 
 # API and dashboard configuration
 api:

@@ -10,7 +10,7 @@ It is possible to install the [plugin locally](https://traefik.io/blog/using-pri
 
 Depending on your setup, the installation steps might differ from the one described here. This example assumes that your Traefik instance runs in a Docker container and uses the [official image](https://hub.docker.com/_/traefik/).
 
-Download the latest release of the plugin and save it to a location the Traefik container can reach. Below is an example of a possible setup. Notice how the plugin source is mapped into the container (`/plugin/geoblock:/plugins-local/src/github.com/PascalMinder/geoblock/`) via a volume bind mount:
+Download the latest release of the plugin and save it to a location the Traefik container can reach. Below is an example of a possible setup. Notice how the plugin source is mapped into the container (`/plugin/geoblock:/plugins-local/src/github.com/T0ut4t1s/traefik-geoblock-asn/`) via a volume bind mount:
 
 #### `docker-compose.yml`
 
@@ -25,7 +25,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /docker/config/traefik/traefik.yml:/etc/traefik/traefik.yml
       - /docker/config/traefik/dynamic-configuration.yml:/etc/traefik/dynamic-configuration.yml
-      - /docker/config/traefik/plugin/geoblock:/plugins-local/src/github.com/PascalMinder/geoblock/
+      - /docker/config/traefik/plugin/geoblock:/plugins-local/src/github.com/T0ut4t1s/traefik-geoblock-asn/
 
     ports:
       - "80:80"
@@ -49,7 +49,7 @@ log:
 experimental:
   localPlugins:
     geoblock:
-      moduleName: github.com/PascalMinder/geoblock
+      moduleName: github.com/T0ut4t1s/traefik-geoblock-asn
 ```
 
 #### `dynamic-configuration.yml`
@@ -88,8 +88,8 @@ Add the following to your `traefik-config.yml`
 experimental:
   plugins:
     geoblock:
-      moduleName: "github.com/PascalMinder/geoblock"
-      version: "v0.3.3"
+      moduleName: "github.com/T0ut4t1s/traefik-geoblock-asn"
+      version: "v0.3.6"
 
 # other stuff you might have in your traefik-config
 entryPoints:
