@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	geoblock "github.com/scheepsnet/traefik-geoblock-asn"
+	geoblock "github.com/T0ut4t1s/traefik-geoblock-asn"
 )
 
 const (

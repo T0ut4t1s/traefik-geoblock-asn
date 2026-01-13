@@ -1,7 +1,7 @@
 displayName: GeoBlock ASN
 type: middleware
 
-import: github.com/scheepsnet/traefik-geoblock-asn
+import: github.com/T0ut4t1s/traefik-geoblock-asn
 
 summary: "Block requests based on country of origin and ASN"
 

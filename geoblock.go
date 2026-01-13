@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	lru "github.com/scheepsnet/traefik-geoblock-asn/lrucache"
+	lru "github.com/T0ut4t1s/traefik-geoblock-asn/lrucache"
 )
 
 const (
