@@ -11,12 +11,13 @@ import (
 	"testing"
 	"time"
 
-	geoblock "github.com/PascalMinder/geoblock"
+	geoblock "github.com/scheepsnet/traefik-geoblock-asn"
 )
 
 const (
 	xForwardedFor                = "X-Forwarded-For"
 	CountryHeader                = "X-IPCountry"
+	ASNHeader                    = "X-IPASN"
 	caExampleIP                  = "99.220.109.148"
 	chExampleIP                  = "82.220.110.18"
 	multiForwardedIP             = "82.220.110.18,192.168.1.1,10.0.0.1"
@@ -25,8 +26,13 @@ const (
 	invalidIP                    = "192.168.1.X"
 	unknownCountry               = "1.1.1.1"
 	apiURI                       = "https://get.geojs.io/v1/ip/country/{ip}"
+	apiURIJSON                   = "https://get.geojs.io/v1/ip/geo/{ip}.json"
 	ipGeolocationHTTPHeaderField = "cf-ipcountry"
 	allowedRequest               = "Allowed request"
+	// Example ASNs for testing
+	caExampleASN = 577   // Bell Canada
+	chExampleASN = 3303  // Swisscom
+	blockedASN   = 15169 // Google
 )
 
 func TestEmptyApi(t *testing.T) {
@@ -1656,4 +1662,406 @@ func createTesterConfig() *geoblock.Config {
 	cfg.UnknownCountryAPIResponse = "nil"
 
 	return cfg
+}
+
+// JSON mock API server for ASN tests
+func createJSONMockAPIServer(t *testing.T, ipResponseMap map[string]struct {
+	CountryCode string
+	ASN         int
+}) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		t.Logf("Intercepted request: %s %s", req.Method, req.URL.String())
+
+		// Extract IP from URL path (e.g., /8.8.8.8.json -> 8.8.8.8)
+		path := req.URL.Path
+		path = strings.TrimPrefix(path, "/")
+		path = strings.TrimSuffix(path, ".json")
+
+		if response, exists := ipResponseMap[path]; exists {
+			t.Logf("Matched IP: %s", path)
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(http.StatusOK)
+			jsonResponse := fmt.Sprintf(`{"ip":"%s","country_code":"%s","asn":%d,"organization_name":"Test Org"}`,
+				path, response.CountryCode, response.ASN)
+			_, _ = rw.Write([]byte(jsonResponse))
+		} else {
+			t.Errorf("Unexpected IP: %s", path)
+			rw.WriteHeader(http.StatusNotFound)
+			_, _ = rw.Write([]byte(`{"error": "IP not found"}`))
+		}
+	}))
+}
+
+// ASN Tests
+
+func TestAllowedCountryAllowedASN(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: chExampleASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.AllowedASNs = append(cfg.AllowedASNs, chExampleASN)
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestAllowedCountryBlockedASN(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: blockedASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.BlockedASNs = append(cfg.BlockedASNs, blockedASN)
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	assertStatusCode(t, recorder.Result(), http.StatusForbidden)
+}
+
+func TestAllowedCountryASNNotInAllowlist(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: 99999}, // Some random ASN not in allowlist
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.AllowedASNs = append(cfg.AllowedASNs, chExampleASN) // Only allow chExampleASN
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// Should be blocked because ASN is not in the allowed list
+	assertStatusCode(t, recorder.Result(), http.StatusForbidden)
+}
+
+func TestAllowedCountryNoASNFiltering(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: blockedASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	// No ASN filtering configured (empty AllowedASNs and BlockedASNs)
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// Should be allowed because no ASN filtering is configured
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestBlockedCountryIgnoresASN(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		caExampleIP: {CountryCode: "CA", ASN: caExampleASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH") // Only CH allowed
+	cfg.AllowedASNs = append(cfg.AllowedASNs, caExampleASN)
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, caExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// Should be blocked because country is not allowed (ASN doesn't matter)
+	assertStatusCode(t, recorder.Result(), http.StatusForbidden)
+}
+
+func TestLocalIPBypassesASNFiltering(t *testing.T) {
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.AllowedASNs = append(cfg.AllowedASNs, chExampleASN)
+	cfg.AllowLocalRequests = true
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, privateRangeIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// Local IPs should be allowed regardless of ASN filtering
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestASNHeader(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: chExampleASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.AddASNHeader = true
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+	assertRequestHeader(t, req, ASNHeader, fmt.Sprintf("%d", chExampleASN))
+}
+
+func TestUnknownASNDenied(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: 0}, // Unknown ASN
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.AllowedASNs = append(cfg.AllowedASNs, chExampleASN)
+	cfg.AllowUnknownASN = false
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// Should be blocked because ASN is unknown and not allowed
+	assertStatusCode(t, recorder.Result(), http.StatusForbidden)
+}
+
+func TestUnknownASNAllowed(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: 0}, // Unknown ASN
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.AllowedASNs = append(cfg.AllowedASNs, chExampleASN)
+	cfg.AllowUnknownASN = true
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// Should be allowed because unknown ASN is allowed
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestMultipleAllowedASNs(t *testing.T) {
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: caExampleASN}, // Using CA's ASN with CH country
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = append(cfg.Countries, "CH")
+	cfg.AllowedASNs = append(cfg.AllowedASNs, chExampleASN, caExampleASN, 12345)
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// Should be allowed because caExampleASN is in the allowed list
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
 }

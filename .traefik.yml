@@ -1,21 +1,28 @@
-displayName: GeoBlock
+displayName: GeoBlock ASN
 type: middleware
 
-import: github.com/PascalMinder/geoblock
+import: github.com/scheepsnet/traefik-geoblock-asn
 
-summary: "block request based on their country of origin"
+summary: "Block requests based on country of origin and ASN"
 
 testData:
   silentStartUp: false
-  allowLocalRequests: false
+  allowLocalRequests: true
   logLocalRequests: false
   logAllowedRequests: false
   logApiRequests: true
-  api: "https://get.geojs.io/v1/ip/country/{ip}"
-  apiTimeoutMs: 150
-  cacheSize: 15
+  api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
+  apiTimeoutMs: 500
+  cacheSize: 25
   forceMonthlyUpdate: true
   allowUnknownCountries: false
   unknownCountryApiResponse: "nil"
   countries:
-    - CH
+    - GB
+    - JP
+  allowedASNs:
+    - 2856
+    - 5378
+  blockedASNs: []
+  addAsnHeader: false
+  allowUnknownAsn: false

@@ -1,8 +1,9 @@
-// Package geoblock a Traefik plugin to block requests based on their country of origin.
+// Package geoblock a Traefik plugin to block requests based on their country of origin and ASN.
 package geoblock
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -15,15 +16,17 @@ import (
 	"strings"
 	"time"
 
-	lru "github.com/PascalMinder/geoblock/lrucache"
+	lru "github.com/scheepsnet/traefik-geoblock-asn/lrucache"
 )
 
 const (
 	xForwardedFor                      = "X-Forwarded-For"
 	xRealIP                            = "X-Real-IP"
 	countryHeader                      = "X-IPCountry"
+	asnHeader                          = "X-IPASN"
 	numberOfHoursInMonth               = 30 * 24
 	unknownCountryCode                 = "AA"
+	unknownASN                         = 0
 	countryCodeLength                  = 2
 	defaultDeniedRequestHTTPStatusCode = 403
 	filePermissions                    = fs.FileMode(0666)
@@ -54,10 +57,24 @@ type Config struct {
 	LogFilePath                  string   `yaml:"logFilePath"`
 	RedirectURLIfDenied          string   `yaml:"redirectUrlIfDenied"`
 	ExcludedPathPatterns         []string `yaml:"excludedPathPatterns,omitempty"`
+	// ASN filtering
+	AllowedASNs     []int `yaml:"allowedASNs,omitempty" json:"allowedASNs,omitempty"`
+	BlockedASNs     []int `yaml:"blockedASNs,omitempty" json:"blockedASNs,omitempty"`
+	AddASNHeader    bool  `yaml:"addAsnHeader"`
+	AllowUnknownASN bool  `yaml:"allowUnknownAsn"`
+}
+
+// GeoJSResponse represents the JSON response from the GeoJS API.
+type GeoJSResponse struct {
+	IP               string `json:"ip"`
+	CountryCode      string `json:"country_code"`
+	ASN              int    `json:"asn"`
+	OrganizationName string `json:"organization_name"`
 }
 
 type ipEntry struct {
 	Country   string
+	ASN       int
 	Timestamp time.Time
 }
 
@@ -96,6 +113,11 @@ type GeoBlock struct {
 	excludedPathRegexps          []*regexp.Regexp
 	name                         string
 	infoLogger                   *log.Logger
+	// ASN filtering
+	allowedASNs     []int
+	blockedASNs     []int
+	addASNHeader    bool
+	allowUnknownASN bool
 }
 
 // New created a new GeoBlock plugin.
@@ -192,6 +214,11 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		excludedPathRegexps:          excludedPathRegexps,
 		name:                         name,
 		infoLogger:                   infoLogger,
+		// ASN filtering
+		allowedASNs:     config.AllowedASNs,
+		blockedASNs:     config.BlockedASNs,
+		addASNHeader:    config.AddASNHeader,
+		allowUnknownASN: config.AllowUnknownASN,
 	}, nil
 }
 
@@ -290,16 +317,20 @@ func (a *GeoBlock) allowDenyIPAddress(requestIPAddr *net.IP, req *http.Request) 
 	}
 
 	// check if the GeoIP database contains an entry for the request IP address
-	allowed, countryCode := a.allowDenyCachedRequestIP(requestIPAddr, req)
+	allowed, countryCode, asn := a.allowDenyCachedRequestIP(requestIPAddr, req)
 
 	if a.addCountryHeader && len(countryCode) > 0 {
 		req.Header.Set(countryHeader, countryCode)
 	}
 
+	if a.addASNHeader && asn != unknownASN {
+		req.Header.Set(asnHeader, fmt.Sprintf("%d", asn))
+	}
+
 	return allowed
 }
 
-func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Request) (bool, string) {
+func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Request) (bool, string, int) {
 	ipAddressString := requestIPAddr.String()
 	cacheEntry, cacheHit := a.database.Get(ipAddressString)
 
@@ -310,24 +341,24 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 		if err != nil {
 			if a.ignoreAPIFailures {
 				a.infoLogger.Printf("%s: request allowed [%s] due to API failure", a.name, requestIPAddr)
-				return true, ""
+				return true, "", unknownASN
 			}
 
 			if os.IsTimeout(err) && a.ignoreAPITimeout {
 				a.infoLogger.Printf("%s: request allowed [%s] due to API timeout", a.name, requestIPAddr)
 				// TODO: this was previously an immediate response to the client
-				return true, ""
+				return true, "", unknownASN
 			}
 
 			a.infoLogger.Printf("%s: request denied [%s] due to error: %s", a.name, requestIPAddr, err)
-			return false, ""
+			return false, "", unknownASN
 		}
 	} else {
 		entry = cacheEntry.(ipEntry)
 	}
 
 	if a.logAPIRequests {
-		a.infoLogger.Printf("%s: [%s] loaded from database: %s", a.name, requestIPAddr, entry)
+		a.infoLogger.Printf("%s: [%s] loaded from database: country=%s asn=%d", a.name, requestIPAddr, entry.Country, entry.ASN)
 	}
 
 	// check if existing entry was made more than a month ago, if so update the entry
@@ -336,10 +367,10 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 		if err != nil {
 			if a.ignoreAPIFailures {
 				a.infoLogger.Printf("%s: request allowed [%s] due to API failure", a.name, requestIPAddr)
-				return true, ""
+				return true, "", unknownASN
 			}
 			a.infoLogger.Printf("%s: request denied [%s] due to error: %s", a.name, requestIPAddr, err)
-			return false, ""
+			return false, "", unknownASN
 		}
 	}
 
@@ -352,32 +383,70 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 		switch {
 		case isUnknownCountry && !a.allowUnknownCountries:
 			a.infoLogger.Printf(
-				"%s: request denied [%s] for country [%s] due to: unknown country",
+				"%s: request denied [%s] for country [%s] ASN [%d] due to: unknown country",
 				a.name,
 				requestIPAddr,
-				entry.Country)
+				entry.Country,
+				entry.ASN)
 		case !isCountryAllowed:
 			a.infoLogger.Printf(
-				"%s: request denied [%s] for country [%s] due to: country is not allowed",
+				"%s: request denied [%s] for country [%s] ASN [%d] due to: country is not allowed",
 				a.name,
 				requestIPAddr,
-				entry.Country)
+				entry.Country,
+				entry.ASN)
 		default:
 			a.infoLogger.Printf(
-				"%s: request denied [%s] for country [%s]",
+				"%s: request denied [%s] for country [%s] ASN [%d]",
 				a.name,
 				requestIPAddr,
-				entry.Country)
+				entry.Country,
+				entry.ASN)
 		}
 
-		return false, entry.Country
+		return false, entry.Country, entry.ASN
+	}
+
+	// ASN filtering - check blocked ASNs first
+	if len(a.blockedASNs) > 0 && intInSlice(entry.ASN, a.blockedASNs) {
+		a.infoLogger.Printf(
+			"%s: request denied [%s] for country [%s] - ASN [%d] is blocked",
+			a.name,
+			requestIPAddr,
+			entry.Country,
+			entry.ASN)
+		return false, entry.Country, entry.ASN
+	}
+
+	// ASN filtering - check allowed ASNs (if configured)
+	if len(a.allowedASNs) > 0 {
+		isUnknownASN := entry.ASN == unknownASN
+		if isUnknownASN && !a.allowUnknownASN {
+			a.infoLogger.Printf(
+				"%s: request denied [%s] for country [%s] - ASN [%d] is unknown and not allowed",
+				a.name,
+				requestIPAddr,
+				entry.Country,
+				entry.ASN)
+			return false, entry.Country, entry.ASN
+		}
+
+		if !isUnknownASN && !intInSlice(entry.ASN, a.allowedASNs) {
+			a.infoLogger.Printf(
+				"%s: request denied [%s] for country [%s] - ASN [%d] is not in allowed list",
+				a.name,
+				requestIPAddr,
+				entry.Country,
+				entry.ASN)
+			return false, entry.Country, entry.ASN
+		}
 	}
 
 	if a.logAllowedRequests {
-		a.infoLogger.Printf("%s: request allowed [%s] for country [%s]", a.name, requestIPAddr, entry.Country)
+		a.infoLogger.Printf("%s: request allowed [%s] for country [%s] ASN [%d]", a.name, requestIPAddr, entry.Country, entry.ASN)
 	}
 
-	return true, entry.Country
+	return true, entry.Country, entry.ASN
 }
 
 func (a *GeoBlock) cachedRequestIP(requestIPAddr *net.IP, req *http.Request) (bool, string) {
@@ -449,26 +518,27 @@ func (a *GeoBlock) collectRemoteIP(req *http.Request) ([]*net.IP, error) {
 func (a *GeoBlock) createNewIPEntry(req *http.Request, ipAddressString string) (ipEntry, error) {
 	var entry ipEntry
 
-	country, err := a.getCountryCode(req, ipAddressString)
+	country, asn, err := a.getGeoInfo(req, ipAddressString)
 	if err != nil {
 		return entry, err
 	}
 
-	entry = ipEntry{Country: country, Timestamp: time.Now()}
+	entry = ipEntry{Country: country, ASN: asn, Timestamp: time.Now()}
 	a.database.Add(ipAddressString, entry)
 
 	if a.logAPIRequests {
-		a.infoLogger.Printf("%s: [%s] added to database: %s", a.name, ipAddressString, entry)
+		a.infoLogger.Printf("%s: [%s] added to database: country=%s asn=%d", a.name, ipAddressString, entry.Country, entry.ASN)
 	}
 
 	return entry, nil
 }
 
-func (a *GeoBlock) getCountryCode(req *http.Request, ipAddressString string) (string, error) {
+func (a *GeoBlock) getGeoInfo(req *http.Request, ipAddressString string) (string, int, error) {
 	if len(a.iPGeolocationHTTPHeaderField) != 0 {
 		country, err := a.readIPGeolocationHTTPHeader(req, a.iPGeolocationHTTPHeaderField)
 		if err == nil {
-			return country, nil
+			// When using HTTP header for country, ASN is not available
+			return country, unknownASN, nil
 		}
 
 		a.infoLogger.Printf(
@@ -478,18 +548,18 @@ func (a *GeoBlock) getCountryCode(req *http.Request, ipAddressString string) (st
 		)
 	}
 
-	country, err := a.callGeoJS(ipAddressString)
+	country, asn, err := a.callGeoJS(ipAddressString)
 	if err != nil {
 		if !(os.IsTimeout(err) || a.ignoreAPITimeout) {
 			a.infoLogger.Printf("%s: %s", a.name, err)
 		}
-		return "", err
+		return "", unknownASN, err
 	}
 
-	return country, nil
+	return country, asn, nil
 }
 
-func (a *GeoBlock) callGeoJS(ipAddress string) (string, error) {
+func (a *GeoBlock) callGeoJS(ipAddress string) (string, int, error) {
 	geoJsClient := http.Client{
 		Timeout: time.Millisecond * time.Duration(a.apiTimeoutMs),
 	}
@@ -498,16 +568,16 @@ func (a *GeoBlock) callGeoJS(ipAddress string) (string, error) {
 
 	req, err := http.NewRequest(http.MethodGet, apiURI, nil)
 	if err != nil {
-		return "", err
+		return "", unknownASN, err
 	}
 
 	res, err := geoJsClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", unknownASN, err
 	}
 
 	if res.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API response status code: %d", res.StatusCode)
+		return "", unknownASN, fmt.Errorf("API response status code: %d", res.StatusCode)
 	}
 
 	if res.Body != nil {
@@ -516,27 +586,46 @@ func (a *GeoBlock) callGeoJS(ipAddress string) (string, error) {
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return "", err
+		return "", unknownASN, err
 	}
 
+	// Try to parse as JSON first (new geo endpoint)
+	var geoResponse GeoJSResponse
+	if err := json.Unmarshal(body, &geoResponse); err == nil {
+		countryCode := geoResponse.CountryCode
+		asn := geoResponse.ASN
+
+		// Handle unknown country
+		if countryCode == "" || (len(a.unknownCountryCode) > 0 && countryCode == a.unknownCountryCode) {
+			countryCode = unknownCountryCode
+		}
+
+		if a.logAPIRequests {
+			a.infoLogger.Printf("%s: Country [%s] ASN [%d] for ip %s fetched from %s", a.name, countryCode, asn, ipAddress, apiURI)
+		}
+
+		return countryCode, asn, nil
+	}
+
+	// Fallback to plain text parsing (legacy country-only endpoint)
 	sb := string(body)
 	countryCode := strings.TrimSuffix(sb, "\n")
 
 	// api response for unknown country
 	if len([]rune(countryCode)) == len(a.unknownCountryCode) && countryCode == a.unknownCountryCode {
-		return unknownCountryCode, nil
+		return unknownCountryCode, unknownASN, nil
 	}
 
 	// this could possible cause a DoS attack
 	if len([]rune(countryCode)) != countryCodeLength {
-		return "", fmt.Errorf("API response has more or less than 2 characters")
+		return "", unknownASN, fmt.Errorf("API response has more or less than 2 characters")
 	}
 
 	if a.logAPIRequests {
-		a.infoLogger.Printf("%s: Country [%s] for ip %s fetched from %s", a.name, countryCode, ipAddress, apiURI)
+		a.infoLogger.Printf("%s: Country [%s] for ip %s fetched from %s (no ASN available)", a.name, countryCode, ipAddress, apiURI)
 	}
 
-	return countryCode, nil
+	return countryCode, unknownASN, nil
 }
 
 func (a *GeoBlock) readIPGeolocationHTTPHeader(req *http.Request, name string) (string, error) {
@@ -550,6 +639,16 @@ func (a *GeoBlock) readIPGeolocationHTTPHeader(req *http.Request, name string) (
 }
 
 func stringInSlice(a string, list []string) bool {
+	for _, b := range list {
+		if b == a {
+			return true
+		}
+	}
+
+	return false
+}
+
+func intInSlice(a int, list []int) bool {
 	for _, b := range list {
 		if b == a {
 			return true
@@ -700,6 +799,15 @@ func printConfiguration(name string, config *Config, logger *log.Logger) {
 	}
 	if len(config.ExcludedPathPatterns) > 0 {
 		logger.Printf("%s: Excluded path patterns: %v", name, config.ExcludedPathPatterns)
+	}
+	// ASN settings
+	logger.Printf("%s: add ASN header: %t", name, config.AddASNHeader)
+	logger.Printf("%s: allow unknown ASN: %t", name, config.AllowUnknownASN)
+	if len(config.AllowedASNs) > 0 {
+		logger.Printf("%s: allowed ASNs: %v", name, config.AllowedASNs)
+	}
+	if len(config.BlockedASNs) > 0 {
+		logger.Printf("%s: blocked ASNs: %v", name, config.BlockedASNs)
 	}
 }
 
