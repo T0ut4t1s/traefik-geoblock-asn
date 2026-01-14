@@ -1,6 +1,14 @@
-# GeoBlock
+# GeoBlock ASN
 
-Simple plugin for [Traefik](https://github.com/containous/traefik) to block or allow requests based on their country of origin and ISP. Uses [GeoJs.io](https://www.geojs.io/).
+A plugin for [Traefik](https://github.com/containous/traefik) to block or allow requests based on their country of origin and/or ISP (via ASN - Autonomous System Number). Uses [GeoJs.io](https://www.geojs.io/) for IP geolocation and ASN lookups.
+
+## Features
+
+- **Country-based filtering**: Allow or block requests based on country codes (whitelist or blacklist mode)
+- **ASN/ISP-based filtering**: Allow or block requests based on ASN numbers to target specific ISPs or organizations
+- **Combined filtering**: Use both country and ASN rules together for fine-grained access control
+- **Caching**: LRU cache to minimize API calls
+- **Path exclusions**: Bypass geo-blocking for specific URL patterns (health checks, webhooks, etc.)
 
 ## Configuration
 
@@ -63,7 +71,7 @@ http:
           logLocalRequests: false
           logAllowedRequests: false
           logApiRequests: true
-          api: "https://get.geojs.io/v1/ip/country/{ip}"
+          api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
           apiTimeoutMs: 750 # optional
           cacheSize: 15
           forceMonthlyUpdate: true
@@ -71,6 +79,13 @@ http:
           unknownCountryApiResponse: "nil"
           countries:
             - CH
+            - GB
+          # ASN/ISP filtering (optional)
+          blockedASNs:
+            - 14061  # DigitalOcean
+            - 16509  # Amazon AWS
+          allowUnknownAsn: false
+          addAsnHeader: false
           excludedPathPatterns:
             - "^[^/]+/health$"
             - "^[^/]+/status$"
@@ -117,7 +132,7 @@ http:
           logLocalRequests: false
           logAllowedRequests: false
           logApiRequests: false
-          api: "https://get.geojs.io/v1/ip/country/{ip}"
+          api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
           apiTimeoutMs: 500
           cacheSize: 25
           forceMonthlyUpdate: true
@@ -125,6 +140,12 @@ http:
           unknownCountryApiResponse: "nil"
           countries:
             - CH
+            - GB
+          # ASN/ISP filtering (optional)
+          allowedASNs: []        # List of allowed ASN numbers (whitelist)
+          blockedASNs: []        # List of blocked ASN numbers (blacklist)
+          allowUnknownAsn: false # Allow requests with unknown ASN
+          addAsnHeader: false    # Add X-IPASN header to requests
           excludedPathPatterns:
             - "^[^/]+/health$"
             - "^[^/]+/status$"
@@ -164,9 +185,11 @@ This configuration might not work. It's just to give you an idea how to configur
 
 - `allowLocalRequests`: If set to true, will not block request from [Private IP Ranges](https://de.wikipedia.org/wiki/Private_IP-Adresse)
 - `logLocalRequests`: If set to true, will log every connection from any IP in the private IP range
-- `api`: API URI used for querying the country associated with the connecting IP
+- `api`: API URI used for querying the country and ASN associated with the connecting IP
 - `countries`: list of allowed countries
 - `blackListMode`: set to `false` so the plugin is running in `whitelist mode`
+- `blockedASNs`: list of ASN numbers to block (e.g., cloud providers, VPNs)
+- `allowedASNs`: list of ASN numbers to allow (whitelist mode for ISPs)
 
 ```yml
 my-GeoBlock:
@@ -177,7 +200,7 @@ my-GeoBlock:
       logLocalRequests: false
       logAllowedRequests: false
       logApiRequests: false
-      api: "https://get.geojs.io/v1/ip/country/{ip}"
+      api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
       apiTimeoutMs: 750 # optional
       cacheSize: 15
       forceMonthlyUpdate: false
@@ -185,6 +208,11 @@ my-GeoBlock:
       unknownCountryApiResponse: "nil"
       blackListMode: false
       addCountryHeader: false
+      # ASN/ISP filtering
+      blockedASNs: []       # Add ASN numbers to block
+      allowedASNs: []       # Add ASN numbers to allow (whitelist)
+      allowUnknownAsn: false
+      addAsnHeader: false
       excludedPathPatterns:
         - "^[^/]+/health$"
         - "^[^/]+/status$"
@@ -520,6 +548,49 @@ allowedIPAddresses:
 ### Add Header to request with Country Code: `addCountryHeader`
 
 If set to `true`, adds the X-IPCountry header to the HTTP request header. The header contains the two letter country code returned by cache or API request.
+
+## ASN/ISP Filtering
+
+ASN (Autonomous System Number) filtering allows you to block or allow requests based on the ISP or organization that owns the IP address. This is useful for:
+
+- Blocking known bot networks or data centers
+- Allowing only specific corporate networks
+- Blocking VPN/proxy providers
+- Fine-grained access control beyond country-level filtering
+
+**Note:** To use ASN filtering, use the JSON API endpoint: `https://get.geojs.io/v1/ip/geo/{ip}.json`
+
+You can look up ASN numbers at [bgp.he.net](https://bgp.he.net/) or [ipinfo.io](https://ipinfo.io/).
+
+### Allowed ASNs `allowedASNs`
+
+A list of ASN numbers that are explicitly allowed. When this list is configured, only requests from these ASNs will be permitted (whitelist mode). Requests from other ASNs will be denied.
+
+```yaml
+allowedASNs:
+  - 2856   # BT (British Telecom)
+  - 5089   # Virgin Media
+  - 6830   # Liberty Global
+```
+
+### Blocked ASNs `blockedASNs`
+
+A list of ASN numbers that should be blocked. Requests from these ASNs will be denied regardless of country (blacklist mode).
+
+```yaml
+blockedASNs:
+  - 14061  # DigitalOcean
+  - 16509  # Amazon AWS
+  - 15169  # Google Cloud
+```
+
+### Allow Unknown ASN `allowUnknownAsn`
+
+If set to `true`, requests from IPs with no associated ASN will be allowed. Default: `false`.
+
+### Add ASN Header `addAsnHeader`
+
+If set to `true`, adds the X-IPASN header to the HTTP request header containing the ASN number. This can be useful for logging or downstream processing.
 
 ### Customize denied request status code `httpStatusCodeDeniedRequest`
 
