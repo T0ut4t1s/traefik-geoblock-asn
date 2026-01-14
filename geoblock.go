@@ -380,30 +380,13 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 	isAllowed := isCountryAllowed || (isUnknownCountry && a.allowUnknownCountries)
 
 	if !isAllowed {
-		switch {
-		case isUnknownCountry && !a.allowUnknownCountries:
-			a.infoLogger.Printf(
-				"%s: request denied [%s] for country [%s] ASN [%d] due to: unknown country",
-				a.name,
-				requestIPAddr,
-				entry.Country,
-				entry.ASN)
-		case !isCountryAllowed:
-			a.infoLogger.Printf(
-				"%s: request denied [%s] for country [%s] ASN [%d] due to: country is not allowed",
-				a.name,
-				requestIPAddr,
-				entry.Country,
-				entry.ASN)
-		default:
-			a.infoLogger.Printf(
-				"%s: request denied [%s] for country [%s] ASN [%d]",
-				a.name,
-				requestIPAddr,
-				entry.Country,
-				entry.ASN)
+		reason := "country is not allowed"
+		if isUnknownCountry && !a.allowUnknownCountries {
+			reason = "unknown country"
 		}
-
+		a.infoLogger.Printf(
+			"%s: request denied [%s] for country [%s] ASN [%d] due to: %s",
+			a.name, requestIPAddr, entry.Country, entry.ASN, reason)
 		return false, entry.Country, entry.ASN
 	}
 
@@ -465,7 +448,7 @@ func (a *GeoBlock) cachedRequestIP(requestIPAddr *net.IP, req *http.Request) (bo
 	}
 
 	if a.logAPIRequests {
-		a.infoLogger.Printf("%s: [%s] Loaded from database: %s", a.name, ipAddressString, entry)
+		a.infoLogger.Printf("%s: [%s] loaded from database: country=%s asn=%d", a.name, ipAddressString, entry.Country, entry.ASN)
 	}
 
 	// check if existing entry was made more than a month ago, if so update the entry
@@ -622,7 +605,9 @@ func (a *GeoBlock) callGeoJS(ipAddress string) (string, int, error) {
 	}
 
 	if a.logAPIRequests {
-		a.infoLogger.Printf("%s: Country [%s] for ip %s fetched from %s (no ASN available)", a.name, countryCode, ipAddress, apiURI)
+		a.infoLogger.Printf(
+			"%s: Country [%s] for ip %s fetched from %s (no ASN available)",
+			a.name, countryCode, ipAddress, apiURI)
 	}
 
 	return countryCode, unknownASN, nil
