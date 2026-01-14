@@ -1230,7 +1230,7 @@ func TestLogDeniedDueToHeaderError_FirstCall(t *testing.T) {
 	}
 
 	wrongCountryCode := "Failed to read country from HTTP header field [cf-ipcountry], continuing with API lookup"
-	countryNotAllowed := "request denied [82.220.110.18] for country [CA] due to: country is not allowed"
+	countryNotAllowed := "request denied [82.220.110.18] for country [CA] ASN ["
 
 	if len(content) == 0 ||
 		!strings.Contains(string(content), wrongCountryCode) ||
