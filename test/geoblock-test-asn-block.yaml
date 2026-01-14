@@ -1,0 +1,63 @@
+# GeoBlock ASN Test - With ASN Blocking
+# Use this to test ASN blocking by temporarily blocking your own ISP
+# Apply: kubectl apply -f geoblock-test-asn-block.yaml
+#
+# Find your ASN at: https://bgp.he.net/ or https://ipinfo.io/
+# Common UK ISPs:
+#   - 2856  = BT
+#   - 5089  = Virgin Media
+#   - 6830  = Liberty Global (Virgin)
+#   - 12576 = EE
+#   - 13285 = TalkTalk
+#   - 20712 = Andrews & Arnold
+#
+# Common NL ISPs:
+#   - 1136  = KPN
+#   - 15542 = Ziggo
+#   - 3265  = XS4ALL
+#
+# Cloud/VPN providers (good to block):
+#   - 14061 = DigitalOcean
+#   - 16509 = Amazon AWS
+#   - 15169 = Google Cloud
+#   - 8075  = Microsoft Azure
+#   - 13335 = Cloudflare
+#   - 20473 = Vultr
+#   - 63949 = Linode
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: geoblock-test
+  namespace: geoblock-test
+spec:
+  plugin:
+    geoblock:
+      silentStartUp: false
+      allowLocalRequests: true
+      logLocalRequests: false
+      logAllowedRequests: true
+      logApiRequests: true
+      api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
+      apiTimeoutMs: 750
+      cacheSize: 25
+      forceMonthlyUpdate: true
+      allowUnknownCountries: false
+      unknownCountryApiResponse: "nil"
+      blackListMode: false
+      countries:
+        - GB
+        - NL
+        - IE
+      # Block cloud providers (test ASN blocking)
+      blockedASNs:
+        - 14061  # DigitalOcean
+        - 16509  # Amazon AWS
+        - 15169  # Google Cloud
+        - 20473  # Vultr
+      allowedASNs: []
+      allowUnknownAsn: true
+      addCountryHeader: true
+      addAsnHeader: true
+      excludedPathPatterns:
+        - "^[^/]+/health$"

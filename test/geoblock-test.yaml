@@ -1,0 +1,163 @@
+# GeoBlock ASN Test Deployment
+# Apply: kubectl apply -f geoblock-test.yaml
+# Delete: kubectl delete -f geoblock-test.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: geoblock-test
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+---
+# NetworkPolicy - only allow ingress from Traefik
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-only
+  namespace: geoblock-test
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-system
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+---
+# Simple nginx that returns request info
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: geoblock-test
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+
+        location / {
+            default_type text/plain;
+            return 200 'GeoBlock Test OK\n\nHost: $host\nRemote Addr: $remote_addr\nX-Forwarded-For: $http_x_forwarded_for\nX-Real-IP: $http_x_real_ip\nX-IPCountry: $http_x_ipcountry\nX-IPASN: $http_x_ipasn\n';
+        }
+
+        location /health {
+            return 200 'healthy\n';
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+  namespace: geoblock-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello
+  template:
+    metadata:
+      labels:
+        app: hello
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+          resources:
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+  namespace: geoblock-test
+spec:
+  selector:
+    app: hello
+  ports:
+    - port: 80
+      targetPort: 80
+---
+# GeoBlock Middleware - adjust countries and ASNs as needed
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: geoblock-test
+  namespace: geoblock-test
+spec:
+  plugin:
+    geoblock:
+      silentStartUp: false
+      allowLocalRequests: true
+      logLocalRequests: false
+      logAllowedRequests: true
+      logApiRequests: true
+      api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
+      apiTimeoutMs: 750
+      cacheSize: 25
+      forceMonthlyUpdate: true
+      allowUnknownCountries: false
+      unknownCountryApiResponse: "nil"
+      blackListMode: false
+      # Allowed countries - adjust to your location
+      countries:
+        - GB  # United Kingdom
+        - NL  # Netherlands
+        - IE  # Ireland
+      # ASN filtering - empty means no ASN filtering
+      allowedASNs: []
+      blockedASNs: []
+      allowUnknownAsn: true
+      # Add headers to see what's detected
+      addCountryHeader: true
+      addAsnHeader: true
+      # Bypass geoblock for health endpoint
+      excludedPathPatterns:
+        - "^[^/]+/health$"
+---
+# IngressRoute - direct ingress (not through Cloudflare tunnel)
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: geoblock-test
+  namespace: geoblock-test
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`geoblock-test.scheeps.online`)
+      kind: Rule
+      middlewares:
+        - name: geoblock-test
+          namespace: geoblock-test
+      services:
+        - name: hello
+          port: 80
+  tls:
+    certResolver: letsencrypt
