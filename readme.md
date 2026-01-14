@@ -1,6 +1,6 @@
 # GeoBlock
 
-Simple plugin for [Traefik](https://github.com/containous/traefik) to block or allow requests based on their country of origin. Uses [GeoJs.io](https://www.geojs.io/).
+Simple plugin for [Traefik](https://github.com/containous/traefik) to block or allow requests based on their country of origin and ISP. Uses [GeoJs.io](https://www.geojs.io/).
 
 ## Configuration
 
