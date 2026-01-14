@@ -128,8 +128,7 @@ spec:
       # Allowed countries - adjust to your location
       countries:
         - GB  # United Kingdom
-        - NL  # Netherlands
-        - IE  # Ireland
+        - ZA  # South Africa
       # ASN filtering - empty means no ASN filtering
       allowedASNs: []
       blockedASNs: []

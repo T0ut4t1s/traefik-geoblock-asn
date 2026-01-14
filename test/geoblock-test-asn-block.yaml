@@ -47,14 +47,14 @@ spec:
       blackListMode: false
       countries:
         - GB
-        - NL
-        - IE
+        - ZA
       # Block cloud providers (test ASN blocking)
       blockedASNs:
         - 14061  # DigitalOcean
         - 16509  # Amazon AWS
         - 15169  # Google Cloud
         - 20473  # Vultr
+        - 12576
       allowedASNs: []
       allowUnknownAsn: true
       addCountryHeader: true
