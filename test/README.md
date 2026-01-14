@@ -130,22 +130,45 @@ Look up ASN numbers for ISPs/organizations:
 
 ### Common UK ISPs
 
-| ASN | Provider |
-|-----|----------|
-| 2856 | BT |
-| 5089 | Virgin Media |
-| 6830 | Liberty Global |
-| 12576 | EE |
-| 13285 | TalkTalk |
-| 20712 | Andrews & Arnold |
+| ASN | Provider | Type |
+|-----|----------|------|
+| 2856 | BT | Broadband/Mobile |
+| 5089 | Virgin Media | Broadband |
+| 6830 | Liberty Global | Broadband (Virgin) |
+| 12576 | EE | Mobile/Broadband |
+| 5378 | Vodafone UK | Mobile |
+| 25135 | Vodafone UK | Mobile (Backbone) |
+| 13285 | TalkTalk | Broadband |
+| 20712 | Andrews & Arnold | Broadband |
 
 ### Common NL ISPs
 
-| ASN | Provider |
-|-----|----------|
-| 1136 | KPN |
-| 15542 | Ziggo |
-| 3265 | XS4ALL |
+| ASN | Provider | Type |
+|-----|----------|------|
+| 1136 | KPN | Broadband/Mobile |
+| 15542 | Ziggo | Broadband |
+| 3265 | XS4ALL | Broadband |
+
+### Common South Africa ISPs
+
+| ASN | Provider | Type |
+|-----|----------|------|
+| 37611 | Afrihost | Fibre/Broadband |
+| 16637 | MTN SA | Mobile |
+| 29975 | Vodacom | Mobile |
+| 36994 | Vodacom Business | Business |
+
+### Common US ISPs
+
+| ASN | Provider | Type |
+|-----|----------|------|
+| 21928 | T-Mobile USA | Mobile |
+| 22140 | T-Mobile USA | Mobile (Secondary) |
+| 701 | Verizon | Fios/Business |
+| 6167 | Verizon | Fios/Cellco |
+| 7018 | AT&T | Broadband/Mobile |
+| 7922 | Comcast | Broadband |
+| 20001 | Charter/Spectrum | Broadband |
 
 ### Cloud/VPN Providers (commonly blocked)
 
