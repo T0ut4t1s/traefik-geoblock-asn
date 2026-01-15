@@ -10,6 +10,9 @@ linters-settings:
       # when module path contains hyphens (traefik-geoblock-asn -> traefik_geoblock_asn)
       - name: var-naming
         disabled: true
+  stylecheck:
+    # Disable ST1003 (underscores in package names) - Yaegi requires underscores
+    checks: ["all", "-ST1003"]
   # dupl:
   #   threshold: 100
   funlen:
