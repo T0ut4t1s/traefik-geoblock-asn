@@ -1,4 +1,4 @@
-package geoblock_test
+package traefik_geoblock_asn_test
 
 import (
 	"context"

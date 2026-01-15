@@ -1,5 +1,5 @@
-// Package geoblock a Traefik plugin to block requests based on their country of origin and ASN.
-package geoblock
+// Package traefik_geoblock_asn a Traefik plugin to block requests based on their country of origin and ASN.
+package traefik_geoblock_asn
 
 import (
 	"context"
