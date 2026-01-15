@@ -4,6 +4,12 @@ run:
   go: "1.22"
 
 linters-settings:
+  revive:
+    rules:
+      # Disable var-naming for package name - Yaegi requires underscores
+      # when module path contains hyphens (traefik-geoblock-asn -> traefik_geoblock_asn)
+      - name: var-naming
+        disabled: true
   # dupl:
   #   threshold: 100
   funlen:
