@@ -31,6 +31,7 @@ const (
 	countryCodeLength                  = 2
 	defaultDeniedRequestHTTPStatusCode = 403
 	filePermissions                    = fs.FileMode(0666)
+	defaultBlockedASNsFileRefreshSecs  = 300
 )
 
 // Config the plugin configuration.
@@ -193,13 +194,34 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		}(infoLogger)
 	}
 
-	// set default file refresh interval
-	blockedASNsFileRefreshSecs := config.BlockedASNsFileRefreshSecs
-	if blockedASNsFileRefreshSecs <= 0 {
-		blockedASNsFileRefreshSecs = 300 // 5 minutes
+	geoBlock := newGeoBlock(next, config, name, allowedIPAddresses, allowedIPRanges,
+		cache, logFile, excludedPathRegexps, infoLogger)
+
+	// attempt initial load of blocked ASNs from file
+	if len(geoBlock.blockedASNsFile) > 0 {
+		if err := geoBlock.loadBlockedASNsFile(); err != nil {
+			infoLogger.Printf("%s: blocked ASNs file not loaded (will retry): %v", name, err)
+		} else {
+			infoLogger.Printf("%s: loaded %d blocked ASNs from file", name, len(geoBlock.dynamicBlockedASNs))
+		}
 	}
 
-	geoBlock := &GeoBlock{
+	return geoBlock, nil
+}
+
+//nolint:funlen
+func newGeoBlock(
+	next http.Handler, config *Config, name string,
+	allowedIPAddresses []net.IP, allowedIPRanges []*net.IPNet,
+	cache *lru.LRUCache, logFile *os.File,
+	excludedPathRegexps []*regexp.Regexp, infoLogger *log.Logger,
+) *GeoBlock {
+	refreshSecs := config.BlockedASNsFileRefreshSecs
+	if refreshSecs <= 0 {
+		refreshSecs = defaultBlockedASNsFileRefreshSecs
+	}
+
+	return &GeoBlock{
 		next:                         next,
 		silentStartUp:                config.SilentStartUp,
 		allowLocalRequests:           config.AllowLocalRequests,
@@ -234,19 +256,8 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		addASNHeader:               config.AddASNHeader,
 		allowUnknownASN:            config.AllowUnknownASN,
 		blockedASNsFile:            config.BlockedASNsFile,
-		blockedASNsFileRefreshSecs: blockedASNsFileRefreshSecs,
+		blockedASNsFileRefreshSecs: refreshSecs,
 	}
-
-	// attempt initial load of blocked ASNs from file
-	if len(geoBlock.blockedASNsFile) > 0 {
-		if err := geoBlock.loadBlockedASNsFile(); err != nil {
-			infoLogger.Printf("%s: blocked ASNs file not loaded (will retry): %v", name, err)
-		} else {
-			infoLogger.Printf("%s: loaded %d blocked ASNs from file %s", name, len(geoBlock.dynamicBlockedASNs), geoBlock.blockedASNsFile)
-		}
-	}
-
-	return geoBlock, nil
 }
 
 func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
