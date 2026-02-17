@@ -209,7 +209,6 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	return geoBlock, nil
 }
 
-//nolint:funlen
 func newGeoBlock(
 	next http.Handler, config *Config, name string,
 	allowedIPAddresses []net.IP, allowedIPRanges []*net.IPNet,
