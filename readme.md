@@ -1,640 +1,275 @@
 # GeoBlock ASN
 
-A plugin for [Traefik](https://github.com/containous/traefik) to block or allow requests based on their country of origin and/or ISP (via ASN - Autonomous System Number). Uses [GeoJs.io](https://www.geojs.io/) for IP geolocation and ASN lookups.
+A [Traefik](https://github.com/traefik/traefik) middleware plugin that blocks or allows requests based on their country of origin and/or ASN (Autonomous System Number). Uses [GeoJS](https://www.geojs.io/) for IP geolocation and ASN lookups.
 
 ## Features
 
-- **Country-based filtering**: Allow or block requests based on country codes (whitelist or blacklist mode)
-- **ASN/ISP-based filtering**: Allow or block requests based on ASN numbers to target specific ISPs or organizations
-- **Combined filtering**: Use both country and ASN rules together for fine-grained access control
-- **Caching**: LRU cache to minimize API calls
+- **Country filtering**: Allow or block requests by country code (whitelist or blacklist mode)
+- **ASN filtering**: Block or allow requests by ASN number to target specific ISPs, cloud providers, or organizations
+- **File-based ASN blocklist**: Load blocked ASNs from a JSON file with periodic refresh — no Traefik restart needed
+- **IP allowlisting**: Explicitly allow specific IPs or CIDR ranges
 - **Path exclusions**: Bypass geo-blocking for specific URL patterns (health checks, webhooks, etc.)
+- **LRU caching**: Minimize API calls with a configurable cache
+- **Custom headers**: Add `X-IPCountry` and `X-IPASN` headers to requests
 
-## Configuration
+## Installation
 
-It is possible to install the [plugin locally](https://traefik.io/blog/using-private-plugins-in-traefik-proxy-2-5/) or to install it through [Traefik Pilot](https://pilot.traefik.io/plugins).
+### Traefik Plugin Registry
 
-### Configuration as local plugin
+Add to your Traefik static configuration:
 
-Depending on your setup, the installation steps might differ from the one described here. This example assumes that your Traefik instance runs in a Docker container and uses the [official image](https://hub.docker.com/_/traefik/).
-
-Download the latest release of the plugin and save it to a location the Traefik container can reach. Below is an example of a possible setup. Notice how the plugin source is mapped into the container (`/plugin/geoblock:/plugins-local/src/github.com/T0ut4t1s/traefik-geoblock-asn/`) via a volume bind mount:
-
-#### `docker-compose.yml`
-
-```yml
-services:
-  traefik:
-    image: traefik
-
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /docker/config/traefik/traefik.yml:/etc/traefik/traefik.yml
-      - /docker/config/traefik/dynamic-configuration.yml:/etc/traefik/dynamic-configuration.yml
-      - /docker/config/traefik/plugin/geoblock:/plugins-local/src/github.com/T0ut4t1s/traefik-geoblock-asn/
-
-    ports:
-      - "80:80"
-
-  hello:
-    image: containous/whoami
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.hello.entrypoints=http
-      - traefik.http.routers.hello.rule=Host(`hello.localhost`)
-      - traefik.http.services.hello.loadbalancer.server.port=80
-      - traefik.http.routers.hello.middlewares=my-plugin@file
+```yaml
+experimental:
+  plugins:
+    geoblock:
+      moduleName: github.com/T0ut4t1s/traefik-geoblock-asn
+      version: v0.4.0
 ```
 
-To complete the setup, the Traefik configuration must be extended with the plugin. For this you must create the `traefik.yml` and the dynamic-configuration.yml` files if not present already.
+### Local Plugin
 
-```yml
-log:
-  level: INFO
+Download the source and mount it into the Traefik container:
 
+```yaml
+volumes:
+  - ./plugin/geoblock:/plugins-local/src/github.com/T0ut4t1s/traefik-geoblock-asn/
+```
+
+```yaml
 experimental:
   localPlugins:
     geoblock:
       moduleName: github.com/T0ut4t1s/traefik-geoblock-asn
 ```
 
-#### `dynamic-configuration.yml`
+## Configuration
 
-```yml
+### Middleware Example
+
+```yaml
 http:
   middlewares:
-    geoblock-ch:
+    my-geoblock:
       plugin:
         geoblock:
-          silentStartUp: false
-          allowLocalRequests: true
-          logLocalRequests: false
-          logAllowedRequests: false
-          logApiRequests: true
-          api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
-          apiTimeoutMs: 750 # optional
-          cacheSize: 15
-          forceMonthlyUpdate: true
-          allowUnknownCountries: false
-          unknownCountryApiResponse: "nil"
-          countries:
-            - CH
-            - GB
-          # ASN/ISP filtering (optional)
-          blockedASNs:
-            - 14061  # DigitalOcean
-            - 16509  # Amazon AWS
-          allowUnknownAsn: false
-          addAsnHeader: false
-          excludedPathPatterns:
-            - "^[^/]+/health$"
-            - "^[^/]+/status$"
-```
-
-### Traefik Plugin registry
-
-This procedure will install the plugin via the [Traefik Plugin registry](https://plugins.traefik.io/install).
-
-Add the following to your `traefik-config.yml`
-
-```yml
-experimental:
-  plugins:
-    geoblock:
-      moduleName: "github.com/T0ut4t1s/traefik-geoblock-asn"
-      version: "v0.3.6"
-
-# other stuff you might have in your traefik-config
-entryPoints:
-  http:
-    address: ":80"
-  https:
-    address: ":443"
-
-providers:
-  docker:
-    endpoint: "unix:///var/run/docker.sock"
-    exposedByDefault: false
-  file:
-    filename: "/etc/traefik/dynamic-configuration.yml"
-```
-
-In your dynamic configuration add the following:
-
-```yml
-http:
-  middlewares:
-    my-GeoBlock:
-      plugin:
-        geoblock:
+          # General
           silentStartUp: false
           allowLocalRequests: true
           logLocalRequests: false
           logAllowedRequests: false
           logApiRequests: false
+
+          # Geolocation API
           api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
-          apiTimeoutMs: 500
+          apiTimeoutMs: 750
+          ignoreApiTimeout: false
+          ignoreApiFailures: false
+
+          # Cache
           cacheSize: 25
           forceMonthlyUpdate: true
+
+          # Country filtering
+          countries:
+            - GB
+            - US
+          blackListMode: false
           allowUnknownCountries: false
           unknownCountryApiResponse: "nil"
-          countries:
-            - CH
-            - GB
-          # ASN/ISP filtering (optional)
-          allowedASNs: []        # List of allowed ASN numbers (whitelist)
-          blockedASNs: []        # List of blocked ASN numbers (blacklist)
-          allowUnknownAsn: false # Allow requests with unknown ASN
-          addAsnHeader: false    # Add X-IPASN header to requests
+          addCountryHeader: true
+
+          # ASN filtering
+          blockedASNs:
+            - 16509  # AWS
+            - 14061  # DigitalOcean
+            - 24940  # Hetzner
+          allowedASNs: []
+          allowUnknownAsn: false
+          addAsnHeader: true
+
+          # File-based ASN blocklist
+          blockedASNsFile: "/data/asn-blocklist/blocked-asns.json"
+          blockedASNsFileRefreshSecs: 86400
+
+          # IP allowlist
+          allowedIPAddresses:
+            - 203.0.113.50
+            - 198.51.100.0/24
+
+          # Path exclusions
           excludedPathPatterns:
             - "^[^/]+/health$"
-            - "^[^/]+/status$"
+            - "^[^/]+/api/webhook/.*"
+
+          # Response
+          httpStatusCodeDeniedRequest: 403
 ```
 
-And some example docker file for traefik:
+### Kubernetes (Traefik CRD)
 
-```yml
-networks:
-  proxy:
-    external: true # specifies that this network has been created outside of Compose, raises an error if it doesn’t exist
-services:
-  traefik:
-    image: traefik:latest
-    container_name: traefik
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    networks:
-      proxy:
-        aliases:
-          - traefik
-    ports:
-      - 80:80
-      - 443:443
-    volumes:
-      - "/etc/timezone:/etc/timezone:ro"
-      - "/etc/localtime:/etc/localtime:ro"
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
-      - "/a/docker/config/traefik/data/traefik.yml:/etc/traefik/traefik.yml:ro"
-      - "/a/docker/config/traefik/data/dynamic-configuration.yml:/etc/traefik/dynamic-configuration.yml"
-```
-
-This configuration might not work. It's just to give you an idea how to configure it.
-
-## Full plugin sample configuration
-
-- `allowLocalRequests`: If set to true, will not block request from [Private IP Ranges](https://de.wikipedia.org/wiki/Private_IP-Adresse)
-- `logLocalRequests`: If set to true, will log every connection from any IP in the private IP range
-- `api`: API URI used for querying the country and ASN associated with the connecting IP
-- `countries`: list of allowed countries
-- `blackListMode`: set to `false` so the plugin is running in `whitelist mode`
-- `blockedASNs`: list of ASN numbers to block (e.g., cloud providers, VPNs)
-- `allowedASNs`: list of ASN numbers to allow (whitelist mode for ISPs)
-
-```yml
-my-GeoBlock:
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: geoblock
+spec:
   plugin:
-    GeoBlock:
+    geoblock:
       silentStartUp: false
-      allowLocalRequests: false
+      allowLocalRequests: true
       logLocalRequests: false
       logAllowedRequests: false
       logApiRequests: false
       api: "https://get.geojs.io/v1/ip/geo/{ip}.json"
-      apiTimeoutMs: 750 # optional
-      cacheSize: 15
-      forceMonthlyUpdate: false
+      apiTimeoutMs: 750
+      cacheSize: 25
+      forceMonthlyUpdate: true
+      countries:
+        - GB
+      blackListMode: false
       allowUnknownCountries: false
       unknownCountryApiResponse: "nil"
-      blackListMode: false
-      addCountryHeader: false
-      # ASN/ISP filtering
-      blockedASNs: []       # Add ASN numbers to block
-      allowedASNs: []       # Add ASN numbers to allow (whitelist)
+      addCountryHeader: true
+      blockedASNsFile: "/data/asn-blocklist/blocked-asns.json"
+      blockedASNsFileRefreshSecs: 86400
+      blockedASNs:
+        - 16509  # AWS (fallback if file not available)
+      allowedASNs: []
       allowUnknownAsn: false
-      addAsnHeader: false
-      excludedPathPatterns:
-        - "^[^/]+/health$"
-        - "^[^/]+/status$"
-      countries:
-        - AF # Afghanistan
-        - AL # Albania
-        - DZ # Algeria
-        - AS # American Samoa
-        - AD # Andorra
-        - AO # Angola
-        - AI # Anguilla
-        - AQ # Antarctica
-        - AG # Antigua and Barbuda
-        - AR # Argentina
-        - AM # Armenia
-        - AW # Aruba
-        - AU # Australia
-        - AT # Austria
-        - AZ # Azerbaijan
-        - BS # Bahamas (the)
-        - BH # Bahrain
-        - BD # Bangladesh
-        - BB # Barbados
-        - BY # Belarus
-        - BE # Belgium
-        - BZ # Belize
-        - BJ # Benin
-        - BM # Bermuda
-        - BT # Bhutan
-        - BO # Bolivia (Plurinational State of)
-        - BQ # Bonaire, Sint Eustatius and Saba
-        - BA # Bosnia and Herzegovina
-        - BW # Botswana
-        - BV # Bouvet Island
-        - BR # Brazil
-        - IO # British Indian Ocean Territory (the)
-        - BN # Brunei Darussalam
-        - BG # Bulgaria
-        - BF # Burkina Faso
-        - BI # Burundi
-        - CV # Cabo Verde
-        - KH # Cambodia
-        - CM # Cameroon
-        - CA # Canada
-        - KY # Cayman Islands (the)
-        - CF # Central African Republic (the)
-        - TD # Chad
-        - CL # Chile
-        - CN # China
-        - CX # Christmas Island
-        - CC # Cocos (Keeling) Islands (the)
-        - CO # Colombia
-        - KM # Comoros (the)
-        - CD # Congo (the Democratic Republic of the)
-        - CG # Congo (the)
-        - CK # Cook Islands (the)
-        - CR # Costa Rica
-        - HR # Croatia
-        - CU # Cuba
-        - CW # Curaçao
-        - CY # Cyprus
-        - CZ # Czechia
-        - CI # Côte d'Ivoire
-        - DK # Denmark
-        - DJ # Djibouti
-        - DM # Dominica
-        - DO # Dominican Republic (the)
-        - EC # Ecuador
-        - EG # Egypt
-        - SV # El Salvador
-        - GQ # Equatorial Guinea
-        - ER # Eritrea
-        - EE # Estonia
-        - SZ # Eswatini
-        - ET # Ethiopia
-        - FK # Falkland Islands (the) [Malvinas]
-        - FO # Faroe Islands (the)
-        - FJ # Fiji
-        - FI # Finland
-        - FR # France
-        - GF # French Guiana
-        - PF # French Polynesia
-        - TF # French Southern Territories (the)
-        - GA # Gabon
-        - GM # Gambia (the)
-        - GE # Georgia
-        - DE # Germany
-        - GH # Ghana
-        - GI # Gibraltar
-        - GR # Greece
-        - GL # Greenland
-        - GD # Grenada
-        - GP # Guadeloupe
-        - GU # Guam
-        - GT # Guatemala
-        - GG # Guernsey
-        - GN # Guinea
-        - GW # Guinea-Bissau
-        - GY # Guyana
-        - HT # Haiti
-        - HM # Heard Island and McDonald Islands
-        - VA # Holy See (the)
-        - HN # Honduras
-        - HK # Hong Kong
-        - HU # Hungary
-        - IS # Iceland
-        - IN # India
-        - ID # Indonesia
-        - IR # Iran (Islamic Republic of)
-        - IQ # Iraq
-        - IE # Ireland
-        - IM # Isle of Man
-        - IL # Israel
-        - IT # Italy
-        - JM # Jamaica
-        - JP # Japan
-        - JE # Jersey
-        - JO # Jordan
-        - KZ # Kazakhstan
-        - KE # Kenya
-        - KI # Kiribati
-        - KP # Korea (the Democratic People's Republic of)
-        - KR # Korea (the Republic of)
-        - KW # Kuwait
-        - KG # Kyrgyzstan
-        - LA # Lao People's Democratic Republic (the)
-        - LV # Latvia
-        - LB # Lebanon
-        - LS # Lesotho
-        - LR # Liberia
-        - LY # Libya
-        - LI # Liechtenstein
-        - LT # Lithuania
-        - LU # Luxembourg
-        - MO # Macao
-        - MG # Madagascar
-        - MW # Malawi
-        - MY # Malaysia
-        - MV # Maldives
-        - ML # Mali
-        - MT # Malta
-        - MH # Marshall Islands (the)
-        - MQ # Martinique
-        - MR # Mauritania
-        - MU # Mauritius
-        - YT # Mayotte
-        - MX # Mexico
-        - FM # Micronesia (Federated States of)
-        - MD # Moldova (the Republic of)
-        - MC # Monaco
-        - MN # Mongolia
-        - ME # Montenegro
-        - MS # Montserrat
-        - MA # Morocco
-        - MZ # Mozambique
-        - MM # Myanmar
-        - NA # Namibia
-        - NR # Nauru
-        - NP # Nepal
-        - NL # Netherlands (the)
-        - NC # New Caledonia
-        - NZ # New Zealand
-        - NI # Nicaragua
-        - NE # Niger (the)
-        - NG # Nigeria
-        - NU # Niue
-        - NF # Norfolk Island
-        - MP # Northern Mariana Islands (the)
-        - NO # Norway
-        - OM # Oman
-        - PK # Pakistan
-        - PW # Palau
-        - PS # Palestine, State of
-        - PA # Panama
-        - PG # Papua New Guinea
-        - PY # Paraguay
-        - PE # Peru
-        - PH # Philippines (the)
-        - PN # Pitcairn
-        - PL # Poland
-        - PT # Portugal
-        - PR # Puerto Rico
-        - QA # Qatar
-        - MK # Republic of North Macedonia
-        - RO # Romania
-        - RU # Russian Federation (the)
-        - RW # Rwanda
-        - RE # Réunion
-        - BL # Saint Barthélemy
-        - SH # Saint Helena, Ascension and Tristan da Cunha
-        - KN # Saint Kitts and Nevis
-        - LC # Saint Lucia
-        - MF # Saint Martin (French part)
-        - PM # Saint Pierre and Miquelon
-        - VC # Saint Vincent and the Grenadines
-        - WS # Samoa
-        - SM # San Marino
-        - ST # Sao Tome and Principe
-        - SA # Saudi Arabia
-        - SN # Senegal
-        - RS # Serbia
-        - SC # Seychelles
-        - SL # Sierra Leone
-        - SG # Singapore
-        - SX # Sint Maarten (Dutch part)
-        - SK # Slovakia
-        - SI # Slovenia
-        - SB # Solomon Islands
-        - SO # Somalia
-        - ZA # South Africa
-        - GS # South Georgia and the South Sandwich Islands
-        - SS # South Sudan
-        - ES # Spain
-        - LK # Sri Lanka
-        - SD # Sudan (the)
-        - SR # Suriname
-        - SJ # Svalbard and Jan Mayen
-        - SE # Sweden
-        - CH # Switzerland
-        - SY # Syrian Arab Republic
-        - TW # Taiwan (Province of China)
-        - TJ # Tajikistan
-        - TZ # Tanzania, United Republic of
-        - TH # Thailand
-        - TL # Timor-Leste
-        - TG # Togo
-        - TK # Tokelau
-        - TO # Tonga
-        - TT # Trinidad and Tobago
-        - TN # Tunisia
-        - TR # Turkey
-        - TM # Turkmenistan
-        - TC # Turks and Caicos Islands (the)
-        - TV # Tuvalu
-        - UG # Uganda
-        - UA # Ukraine
-        - AE # United Arab Emirates (the)
-        - GB # United Kingdom of Great Britain and Northern Ireland (the)
-        - UM # United States Minor Outlying Islands (the)
-        - US # United States of America (the)
-        - UY # Uruguay
-        - UZ # Uzbekistan
-        - VU # Vanuatu
-        - VE # Venezuela (Bolivarian Republic of)
-        - VN # Viet Nam
-        - VG # Virgin Islands (British)
-        - VI # Virgin Islands (U.S.)
-        - WF # Wallis and Futuna
-        - EH # Western Sahara
-        - YE # Yemen
-        - ZM # Zambia
-        - ZW # Zimbabwe
-        - AX # Åland Islands
+      addAsnHeader: true
+      httpStatusCodeDeniedRequest: 403
 ```
 
-## Configuration options
+## Configuration Reference
 
-### Silent start-up: `silentStartUp`
+### General
 
-If set to true, the configuration is not written to the output upon the start-up of the plugin.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `silentStartUp` | bool | `false` | Suppress configuration logging on startup |
+| `allowLocalRequests` | bool | `false` | Allow requests from [private IP ranges](https://en.wikipedia.org/wiki/Private_network) |
+| `logLocalRequests` | bool | `false` | Log requests from private IP addresses |
+| `logAllowedRequests` | bool | `false` | Log allowed requests with IP and country |
+| `logApiRequests` | bool | `false` | Log every API lookup |
+| `logFilePath` | string | | Path to a custom log file (folder must be writable) |
 
-### Allow local requests: `allowLocalRequests`
+### Geolocation API
 
-If set to true, will not block request from [Private IP Ranges](https://en.wikipedia.org/wiki/Private_network).
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `api` | string | **required** | API URL with `{ip}` placeholder. Use the JSON endpoint for ASN support: `https://get.geojs.io/v1/ip/geo/{ip}.json` |
+| `apiTimeoutMs` | int | `750` | API request timeout in milliseconds |
+| `ignoreApiTimeout` | bool | `false` | Allow requests when the API times out |
+| `ignoreApiFailures` | bool | `false` | Allow requests when the API returns an error |
+| `ipGeolocationHttpHeaderField` | string | | Read country code from this HTTP header instead of calling the API (e.g. `cf-ipcountry` for Cloudflare) |
+| `xForwardedForReverseProxy` | bool | `false` | Only use the first IP in `X-Forwarded-For` (for services behind a reverse proxy like Cloudflare) |
 
-### Log local requests: `logLocalRequests`
+### Cache
 
-If set to true, will show a log message when some one accesses the service over a private ip address.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `cacheSize` | int | **required** | Maximum number of entries in the LRU cache |
+| `forceMonthlyUpdate` | bool | `false` | Re-fetch cached entries after ~30 days |
 
-### Log allowed requests `logAllowedRequests`
+### Country Filtering
 
-If set to true, will show a log message with the IP and the country of origin if a request is allowed.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `countries` | []string | **required** | List of country codes (ISO 3166-1 alpha-2) |
+| `blackListMode` | bool | `false` | When `false` (whitelist mode), only listed countries are allowed. When `true` (blacklist mode), listed countries are blocked |
+| `allowUnknownCountries` | bool | `false` | Allow requests from IPs with no associated country |
+| `unknownCountryApiResponse` | string | | The API response string that indicates an unknown country |
+| `addCountryHeader` | bool | `false` | Add `X-IPCountry` header to forwarded requests |
 
-### Log API requests `logApiRequests`
+### ASN Filtering
 
-If set to true, will show a log message for every API hit.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `blockedASNs` | []int | `[]` | ASN numbers to block. Used as fallback when `blockedASNsFile` is not available |
+| `blockedASNsFile` | string | | Path to a JSON file containing an array of blocked ASN numbers. When loaded, overrides `blockedASNs` |
+| `blockedASNsFileRefreshSecs` | int | `300` | How often (in seconds) to re-read the blocked ASNs file |
+| `allowedASNs` | []int | `[]` | ASN numbers to allow (whitelist). When configured, only these ASNs are permitted |
+| `allowUnknownAsn` | bool | `false` | Allow requests from IPs with no associated ASN (only applies when `allowedASNs` is configured) |
+| `addAsnHeader` | bool | `false` | Add `X-IPASN` header to forwarded requests |
 
-### API `api`
+ASN numbers can be looked up at [bgp.he.net](https://bgp.he.net/) or [ipinfo.io](https://ipinfo.io/).
 
-Defines the API URL for the IP to Country resolution. The IP to fetch can be added with `{ip}` to the URL.
+#### File-Based ASN Blocklist
 
-### API Timeout `apiTimeoutMs`
+The `blockedASNsFile` option points to a JSON file containing an array of ASN integers:
 
-Timeout for the call to the api uri.
+```json
+[16509, 14618, 8075, 396982, 15169, 24940]
+```
 
-### Ignore the API timeout error `ignoreAPITimeout`
+This allows updating the blocked ASN list without restarting Traefik or modifying the Middleware configuration. The plugin:
 
-If the `ignoreAPITimeout` option is set to `true`, a request is allowed even if the API could not be reached.
+1. Reads the file on startup
+2. Re-reads it periodically (controlled by `blockedASNsFileRefreshSecs`)
+3. Falls back to inline `blockedASNs` if the file doesn't exist or is empty
+4. Is thread-safe — file reads don't block request processing
 
-### Ignore the API failures `ignoreAPIFailures`
+In Kubernetes, mount a ConfigMap as a **directory** (not `subPath`) so that kubelet can auto-update the file when the ConfigMap changes:
 
-If the `ignoreAPIFailures` option is set to `true`, a request is allowed even if the API returns a non-200 status code or an error occurs during the API request.
+```yaml
+# Traefik Helm values
+deployment:
+  additionalVolumes:
+    - name: asn-blocklist
+      configMap:
+        name: asn-blocklist
+        optional: true  # Traefik starts even if the ConfigMap doesn't exist yet
 
-### Set custom HTTP header field to retrieve the country code from `ipGeolocationHttpHeaderField`
+additionalVolumeMounts:
+  - name: asn-blocklist
+    mountPath: /data/asn-blocklist
+    readOnly: true
+```
 
-Allow setting the name of a custom HTTP header field to retrieve the country code from. E.g. `cf-ipcountry` for Cloudflare.
+### IP Allowlist
 
-### Cache size `cacheSize`
-
-Defines the max size of the [LRU](<https://en.wikipedia.org/wiki/Cache_replacement_policies#Least_recently_used_(LRU)>) (least recently used) cache.
-
-### Force monthly update `forceMonthlyUpdate`
-
-Even if an IP stays in the cache for a period of a month (about 30 x 24 hours), it must be fetch again after a month.
-
-### Allow unknown countries `allowUnknownCountries`
-
-Some IP addresses have no country associated with them. If this option is set to true, all IPs with no associated country are also allowed.
-
-### Unknown country api response `unknownCountryApiResponse`
-
-The API uri can be customized. This options allows to customize the response string of the API when a IP with no associated country is requested.
-
-### Black list mode `blackListMode`
-
-When set to `true` the filter logic is inverted, i.e. requests originating from countries listed in the [`countries`](#countries-countries) list are **blocked**. Default: `false`.
-
-### Countries `countries`
-
-A list of country codes from which connections to the service should be allowed. Logic can be inverted by using the [`blackListMode`](#black-list-mode-blacklistmode).
-
-### Allowed IP addresses `allowedIPAddresses`
-
-A list of explicitly allowed IP addresses or IP address ranges. IP addresses and ranges added to this list will always be allowed.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `allowedIPAddresses` | []string | `[]` | IPs or CIDR ranges that are always allowed, bypassing all geo/ASN checks |
 
 ```yaml
 allowedIPAddresses:
-  - 192.0.2.10 # single IPv4 address
-  - 203.0.113.0/24 # IPv4 range in CIDR format
-  - 2001:db8:1234:/48 # IPv6 range in CIDR format
+  - 192.0.2.10        # single IPv4
+  - 203.0.113.0/24    # IPv4 CIDR range
+  - 2001:db8:1234::/48  # IPv6 CIDR range
 ```
 
-### Add Header to request with Country Code: `addCountryHeader`
+### Path Exclusions
 
-If set to `true`, adds the X-IPCountry header to the HTTP request header. The header contains the two letter country code returned by cache or API request.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `excludedPathPatterns` | []string | `[]` | Regex patterns for paths that bypass all checks |
 
-## ASN/ISP Filtering
-
-ASN (Autonomous System Number) filtering allows you to block or allow requests based on the ISP or organization that owns the IP address. This is useful for:
-
-- Blocking known bot networks or data centers
-- Allowing only specific corporate networks
-- Blocking VPN/proxy providers
-- Fine-grained access control beyond country-level filtering
-
-**Note:** To use ASN filtering, use the JSON API endpoint: `https://get.geojs.io/v1/ip/geo/{ip}.json`
-
-You can look up ASN numbers at [bgp.he.net](https://bgp.he.net/) or [ipinfo.io](https://ipinfo.io/).
-
-### Allowed ASNs `allowedASNs`
-
-A list of ASN numbers that are explicitly allowed. When this list is configured, only requests from these ASNs will be permitted (whitelist mode). Requests from other ASNs will be denied.
-
-```yaml
-allowedASNs:
-  - 2856   # BT (British Telecom)
-  - 5089   # Virgin Media
-  - 6830   # Liberty Global
-```
-
-### Blocked ASNs `blockedASNs`
-
-A list of ASN numbers that should be blocked. Requests from these ASNs will be denied regardless of country (blacklist mode).
-
-```yaml
-blockedASNs:
-  - 14061  # DigitalOcean
-  - 16509  # Amazon AWS
-  - 15169  # Google Cloud
-```
-
-### Allow Unknown ASN `allowUnknownAsn`
-
-If set to `true`, requests from IPs with no associated ASN will be allowed. Default: `false`.
-
-### Add ASN Header `addAsnHeader`
-
-If set to `true`, adds the X-IPASN header to the HTTP request header containing the ASN number. This can be useful for logging or downstream processing.
-
-### Customize denied request status code `httpStatusCodeDeniedRequest`
-
-Allows customizing the HTTP status code returned if the request was denied.
-
-### Define a custom log file `logFilePath`
-
-Allows to define a target for the logs of the middleware. The path must look like the following: `logFilePath: "/log/geoblock.log"`. Make sure the folder is writeable.
-
-### Define a custom log file `XForwardedForReverseProxy`
-
-Basically tells GeoBlock to only allow/deny a request based on the first IP address in the X-ForwardedFor HTTP header. This is useful for servers behind e.g. a Cloudflare proxy.
-
-### Define a custom log file `redirectUrlIfDenied`
-
-Allows returning a HTTP 301 status code, which indicates that the requested resource has been moved. The URL which can be specified is used to redirect the client to. So instead of "blocking" the client, the client will be redirected to the configured URL.
-
-### Excluded Path Patterns `excludedPathPatterns`
-
-Allows defining a list of regex patterns for requests that should bypass all geoblock checks. Requests matching any of these patterns will be allowed immediately without performing IP lookups, cache checks, or API calls. 
-
-Patterns are matched against the full request URL in the format: `domain.com/path`. This allows you to exclude:
-- Specific paths on any domain
-- Specific domains entirely
-- Specific paths on specific domains
-
-This is useful for:
-- Health check endpoints (`/health`, `/ping`)
-- Webhook endpoints that need to accept requests from anywhere
-- Metrics/monitoring endpoints
-- Public API endpoints
-- Specific subdomains
+Patterns match against `{domain}{path}` (e.g. `example.com/health`):
 
 ```yaml
 excludedPathPatterns:
-  - "^[^/]+/health$"                    # /health on any domain
-  - "^[^/]+/status$"                    # /status on any domain
-  - "^webhook\.example\.com"            # Any path on webhook.example.com
-  - "^webhook\.example\.com/github$"    # Only /github on webhook.example.com
-  - "^[^/]+/api/webhook/.*"             # /api/webhook/* on any domain
-  - "^[^/]+/metrics.*"                  # /metrics* on any domain
-  - "^monitoring\.example\.com/.*"      # All paths on monitoring.example.com
+  - "^[^/]+/health$"                 # /health on any domain
+  - "^[^/]+/api/webhook/.*"          # /api/webhook/* on any domain
+  - "^webhook\\.example\\.com"       # Any path on webhook.example.com
 ```
 
-**Pattern Format:** The pattern matches against `{domain}{path}` (e.g., `example.com/health`, `api.example.com/webhook/github`)
+### Response
 
-**Note:** Patterns are evaluated as regular expressions. Use `^` to match the start and `$` to match the end. The pattern `[^/]+` matches any domain. Invalid regex patterns will cause the plugin to fail at startup.
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `httpStatusCodeDeniedRequest` | int | `403` | HTTP status code for denied requests |
+| `redirectUrlIfDenied` | string | | Redirect denied requests to this URL (HTTP 302) instead of returning the status code |
+
+## Request Evaluation Order
+
+1. **Path exclusions** — if the request URL matches an excluded pattern, it is allowed immediately
+2. **Private IPs** — checked against `allowLocalRequests`
+3. **IP allowlist** — if the IP matches `allowedIPAddresses`, it is allowed
+4. **Country check** — the IP's country is looked up and checked against the `countries` list (respecting `blackListMode`)
+5. **ASN block check** — if the IP's ASN is in the effective blocked list (file-based or inline), it is denied
+6. **ASN allow check** — if `allowedASNs` is configured, only those ASNs are permitted
+
+## License
+
+[Apache 2.0](LICENSE)
