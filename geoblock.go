@@ -702,9 +702,10 @@ func (a *GeoBlock) callGeoJS(ipAddress string) (string, int, error) {
 		return unknownCountryCode, unknownASN, nil
 	}
 
-	// this could possible cause a DoS attack
+	// unexpected response length — treat as unknown country
 	if len([]rune(countryCode)) != countryCodeLength {
-		return "", unknownASN, fmt.Errorf("API response has more or less than 2 characters")
+		a.infoLogger.Printf("%s: API response has more or less than 2 characters, treating as unknown", a.name)
+		return unknownCountryCode, unknownASN, nil
 	}
 
 	if a.logAPIRequests {
