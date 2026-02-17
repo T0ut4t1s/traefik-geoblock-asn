@@ -24,5 +24,7 @@ testData:
     - 2856
     - 5378
   blockedASNs: []
+  blockedASNsFile: ""
+  blockedASNsFileRefreshSecs: 300
   addAsnHeader: false
   allowUnknownAsn: false

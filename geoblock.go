@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	lru "github.com/T0ut4t1s/traefik-geoblock-asn/lrucache"
@@ -58,10 +59,12 @@ type Config struct {
 	RedirectURLIfDenied          string   `yaml:"redirectUrlIfDenied"`
 	ExcludedPathPatterns         []string `yaml:"excludedPathPatterns,omitempty"`
 	// ASN filtering
-	AllowedASNs     []int `yaml:"allowedASNs,omitempty" json:"allowedASNs,omitempty"`
-	BlockedASNs     []int `yaml:"blockedASNs,omitempty" json:"blockedASNs,omitempty"`
-	AddASNHeader    bool  `yaml:"addAsnHeader"`
-	AllowUnknownASN bool  `yaml:"allowUnknownAsn"`
+	AllowedASNs                []int  `yaml:"allowedASNs,omitempty" json:"allowedASNs,omitempty"`
+	BlockedASNs                []int  `yaml:"blockedASNs,omitempty" json:"blockedASNs,omitempty"`
+	AddASNHeader               bool   `yaml:"addAsnHeader"`
+	AllowUnknownASN            bool   `yaml:"allowUnknownAsn"`
+	BlockedASNsFile            string `yaml:"blockedASNsFile"`
+	BlockedASNsFileRefreshSecs int    `yaml:"blockedASNsFileRefreshSecs"`
 }
 
 // GeoJSResponse represents the JSON response from the GeoJS API.
@@ -114,10 +117,15 @@ type GeoBlock struct {
 	name                         string
 	infoLogger                   *log.Logger
 	// ASN filtering
-	allowedASNs     []int
-	blockedASNs     []int
-	addASNHeader    bool
-	allowUnknownASN bool
+	allowedASNs                []int
+	blockedASNs                []int
+	addASNHeader               bool
+	allowUnknownASN            bool
+	blockedASNsFile            string
+	blockedASNsFileRefreshSecs int
+	dynamicBlockedASNs         []int
+	lastFileCheck              time.Time
+	asnMu                      sync.RWMutex
 }
 
 // New created a new GeoBlock plugin.
@@ -185,7 +193,13 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		}(infoLogger)
 	}
 
-	return &GeoBlock{
+	// set default file refresh interval
+	blockedASNsFileRefreshSecs := config.BlockedASNsFileRefreshSecs
+	if blockedASNsFileRefreshSecs <= 0 {
+		blockedASNsFileRefreshSecs = 300 // 5 minutes
+	}
+
+	geoBlock := &GeoBlock{
 		next:                         next,
 		silentStartUp:                config.SilentStartUp,
 		allowLocalRequests:           config.AllowLocalRequests,
@@ -215,14 +229,30 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		name:                         name,
 		infoLogger:                   infoLogger,
 		// ASN filtering
-		allowedASNs:     config.AllowedASNs,
-		blockedASNs:     config.BlockedASNs,
-		addASNHeader:    config.AddASNHeader,
-		allowUnknownASN: config.AllowUnknownASN,
-	}, nil
+		allowedASNs:                config.AllowedASNs,
+		blockedASNs:                config.BlockedASNs,
+		addASNHeader:               config.AddASNHeader,
+		allowUnknownASN:            config.AllowUnknownASN,
+		blockedASNsFile:            config.BlockedASNsFile,
+		blockedASNsFileRefreshSecs: blockedASNsFileRefreshSecs,
+	}
+
+	// attempt initial load of blocked ASNs from file
+	if len(geoBlock.blockedASNsFile) > 0 {
+		if err := geoBlock.loadBlockedASNsFile(); err != nil {
+			infoLogger.Printf("%s: blocked ASNs file not loaded (will retry): %v", name, err)
+		} else {
+			infoLogger.Printf("%s: loaded %d blocked ASNs from file %s", name, len(geoBlock.dynamicBlockedASNs), geoBlock.blockedASNsFile)
+		}
+	}
+
+	return geoBlock, nil
 }
 
 func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	// check for blocked ASNs file updates
+	a.maybeRefreshBlockedASNs()
+
 	fullURL := req.Host + req.URL.Path
 	if a.isPathExcluded(fullURL) {
 		if a.logAllowedRequests {
@@ -259,6 +289,68 @@ func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	a.next.ServeHTTP(rw, req)
+}
+
+// loadBlockedASNsFile reads and parses a JSON array of ASN integers from the configured file.
+func (a *GeoBlock) loadBlockedASNsFile() error {
+	data, err := os.ReadFile(a.blockedASNsFile)
+	if err != nil {
+		return fmt.Errorf("reading blocked ASNs file: %w", err)
+	}
+
+	var asns []int
+	if err := json.Unmarshal(data, &asns); err != nil {
+		return fmt.Errorf("parsing blocked ASNs file: %w", err)
+	}
+
+	if len(asns) == 0 {
+		return fmt.Errorf("blocked ASNs file is empty")
+	}
+
+	a.dynamicBlockedASNs = asns
+	a.lastFileCheck = time.Now()
+	return nil
+}
+
+// getEffectiveBlockedASNs returns the dynamic file-based ASNs if loaded, otherwise the inline config ASNs.
+func (a *GeoBlock) getEffectiveBlockedASNs() []int {
+	a.asnMu.RLock()
+	defer a.asnMu.RUnlock()
+
+	if len(a.dynamicBlockedASNs) > 0 {
+		return a.dynamicBlockedASNs
+	}
+	return a.blockedASNs
+}
+
+// maybeRefreshBlockedASNs periodically re-reads the blocked ASNs file.
+func (a *GeoBlock) maybeRefreshBlockedASNs() {
+	if len(a.blockedASNsFile) == 0 {
+		return
+	}
+
+	a.asnMu.RLock()
+	elapsed := time.Since(a.lastFileCheck)
+	a.asnMu.RUnlock()
+
+	if elapsed.Seconds() < float64(a.blockedASNsFileRefreshSecs) {
+		return
+	}
+
+	a.asnMu.Lock()
+	defer a.asnMu.Unlock()
+
+	// double-check after acquiring write lock
+	if time.Since(a.lastFileCheck).Seconds() < float64(a.blockedASNsFileRefreshSecs) {
+		return
+	}
+
+	if err := a.loadBlockedASNsFile(); err != nil {
+		a.infoLogger.Printf("%s: failed to refresh blocked ASNs file: %v", a.name, err)
+		a.lastFileCheck = time.Now() // avoid retrying every request
+	} else {
+		a.infoLogger.Printf("%s: refreshed %d blocked ASNs from file", a.name, len(a.dynamicBlockedASNs))
+	}
 }
 
 func (a *GeoBlock) isPathExcluded(path string) bool {
@@ -390,8 +482,9 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 		return false, entry.Country, entry.ASN
 	}
 
-	// ASN filtering - check blocked ASNs first
-	if len(a.blockedASNs) > 0 && intInSlice(entry.ASN, a.blockedASNs) {
+	// ASN filtering - check blocked ASNs first (file-based or inline)
+	effectiveBlockedASNs := a.getEffectiveBlockedASNs()
+	if len(effectiveBlockedASNs) > 0 && intInSlice(entry.ASN, effectiveBlockedASNs) {
 		a.infoLogger.Printf(
 			"%s: request denied [%s] for country [%s] - ASN [%d] is blocked",
 			a.name,
@@ -793,6 +886,10 @@ func printConfiguration(name string, config *Config, logger *log.Logger) {
 	}
 	if len(config.BlockedASNs) > 0 {
 		logger.Printf("%s: blocked ASNs: %v", name, config.BlockedASNs)
+	}
+	if len(config.BlockedASNsFile) > 0 {
+		logger.Printf("%s: blocked ASNs file: %s", name, config.BlockedASNsFile)
+		logger.Printf("%s: blocked ASNs file refresh: %ds", name, config.BlockedASNsFileRefreshSecs)
 	}
 }
 
