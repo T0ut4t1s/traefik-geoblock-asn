@@ -26,5 +26,7 @@ testData:
   blockedASNs: []
   blockedASNsFile: ""
   blockedASNsFileRefreshSecs: 300
+  countriesFile: ""
+  countriesFileRefreshSecs: 300
   addAsnHeader: false
   allowUnknownAsn: false

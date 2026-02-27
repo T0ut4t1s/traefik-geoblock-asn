@@ -2,6 +2,7 @@ package traefik_geoblock_asn_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -2064,4 +2065,252 @@ func TestMultipleAllowedASNs(t *testing.T) {
 
 	// Should be allowed because caExampleASN is in the allowed list
 	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+// CountriesFile Tests
+
+func TestCountriesFileAllowed(t *testing.T) {
+	// Create a temp file with countries
+	tmpFile := createTempCountriesFile(t, []string{"CH", "GB"})
+	defer os.Remove(tmpFile)
+
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: chExampleASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = []string{"US"} // inline fallback, should be overridden by file
+	cfg.CountriesFile = tmpFile
+	cfg.CountriesFileRefreshSecs = 300
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// CH is in the countries file, should be allowed
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestCountriesFileDenied(t *testing.T) {
+	// Create a temp file with countries that don't include CH
+	tmpFile := createTempCountriesFile(t, []string{"GB", "US"})
+	defer os.Remove(tmpFile)
+
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: chExampleASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = []string{"CH"} // inline allows CH, but file overrides
+	cfg.CountriesFile = tmpFile
+	cfg.CountriesFileRefreshSecs = 300
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// CH is NOT in the countries file, should be denied
+	assertStatusCode(t, recorder.Result(), http.StatusForbidden)
+}
+
+func TestCountriesFileFallbackToInline(t *testing.T) {
+	// Use a non-existent file - should fall back to inline countries
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: chExampleASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = []string{"CH"}
+	cfg.CountriesFile = "/tmp/nonexistent-countries-file.json"
+	cfg.CountriesFileRefreshSecs = 300
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// File doesn't exist, so inline countries (CH) should be used as fallback
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestCountriesFileOnlyNoInline(t *testing.T) {
+	// Create a temp file with countries
+	tmpFile := createTempCountriesFile(t, []string{"CH", "GB"})
+	defer os.Remove(tmpFile)
+
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: chExampleASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = []string{} // empty inline, file provides countries
+	cfg.CountriesFile = tmpFile
+	cfg.CountriesFileRefreshSecs = 300
+	cfg.API = mockServer.URL + "/{ip}.json"
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add(xForwardedFor, chExampleIP)
+
+	handler.ServeHTTP(recorder, req)
+
+	// CH is in the countries file, should be allowed even with empty inline
+	assertStatusCode(t, recorder.Result(), http.StatusOK)
+}
+
+func TestCountriesFileRefresh(t *testing.T) {
+	// Start with GB only
+	tmpFile := createTempCountriesFile(t, []string{"GB"})
+	defer os.Remove(tmpFile)
+
+	mockServer := createJSONMockAPIServer(t, map[string]struct {
+		CountryCode string
+		ASN         int
+	}{
+		chExampleIP: {CountryCode: "CH", ASN: chExampleASN},
+	})
+	defer mockServer.Close()
+
+	cfg := createTesterConfig()
+	cfg.Countries = []string{"US"}
+	cfg.CountriesFile = tmpFile
+	cfg.CountriesFileRefreshSecs = 1 // 1 second refresh
+	cfg.API = mockServer.URL + "/{ip}.json"
+	cfg.CacheSize = 0 // disable cache so each request re-evaluates
+
+	ctx := context.Background()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(allowedRequest))
+	})
+
+	handler, err := geoblock.New(ctx, next, cfg, "GeoBlock")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First request - CH not in file (GB only), should be denied
+	recorder := httptest.NewRecorder()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add(xForwardedFor, chExampleIP)
+	handler.ServeHTTP(recorder, req)
+	assertStatusCode(t, recorder.Result(), http.StatusForbidden)
+
+	// Update file to include CH
+	if err := os.WriteFile(tmpFile, []byte(`["GB", "CH"]`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for refresh interval
+	time.Sleep(1100 * time.Millisecond)
+
+	// Second request - CH now in file, should be allowed
+	recorder2 := httptest.NewRecorder()
+	req2, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req2.Header.Add(xForwardedFor, chExampleIP)
+	handler.ServeHTTP(recorder2, req2)
+	assertStatusCode(t, recorder2.Result(), http.StatusOK)
+}
+
+func createTempCountriesFile(t *testing.T, countries []string) string {
+	t.Helper()
+
+	tmpFile, err := os.CreateTemp("", "countries-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := json.Marshal(countries)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := tmpFile.Write(data); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return tmpFile.Name()
 }

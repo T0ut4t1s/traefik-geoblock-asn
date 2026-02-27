@@ -31,7 +31,8 @@ const (
 	countryCodeLength                  = 2
 	defaultDeniedRequestHTTPStatusCode = 403
 	filePermissions                    = fs.FileMode(0666)
-	defaultBlockedASNsFileRefreshSecs  = 300
+	defaultBlockedASNsFileRefreshSecs    = 300
+	defaultCountriesFileRefreshSecs      = 300
 )
 
 // Config the plugin configuration.
@@ -66,6 +67,9 @@ type Config struct {
 	AllowUnknownASN            bool   `yaml:"allowUnknownAsn"`
 	BlockedASNsFile            string `yaml:"blockedASNsFile"`
 	BlockedASNsFileRefreshSecs int    `yaml:"blockedASNsFileRefreshSecs"`
+	// Country file filtering
+	CountriesFile            string `yaml:"countriesFile"`
+	CountriesFileRefreshSecs int    `yaml:"countriesFileRefreshSecs"`
 }
 
 // GeoJSResponse represents the JSON response from the GeoJS API.
@@ -127,6 +131,12 @@ type GeoBlock struct {
 	dynamicBlockedASNs         []int
 	lastFileCheck              time.Time
 	asnMu                      sync.RWMutex
+	// Country file filtering
+	countriesFile            string
+	countriesFileRefreshSecs int
+	dynamicCountries         []string
+	lastCountriesFileCheck   time.Time
+	countriesMu              sync.RWMutex
 }
 
 // New created a new GeoBlock plugin.
@@ -138,8 +148,8 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, fmt.Errorf("no api uri given")
 	}
 
-	// check if at least one allowed country is provided
-	if len(config.Countries) == 0 {
+	// check if at least one allowed country is provided (or a countries file)
+	if len(config.Countries) == 0 && len(config.CountriesFile) == 0 {
 		return nil, fmt.Errorf("no allowed country code provided")
 	}
 
@@ -206,6 +216,15 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		}
 	}
 
+	// attempt initial load of countries from file
+	if len(geoBlock.countriesFile) > 0 {
+		if err := geoBlock.loadCountriesFile(); err != nil {
+			infoLogger.Printf("%s: countries file not loaded (will retry): %v", name, err)
+		} else {
+			infoLogger.Printf("%s: loaded %d countries from file", name, len(geoBlock.dynamicCountries))
+		}
+	}
+
 	return geoBlock, nil
 }
 
@@ -218,6 +237,11 @@ func newGeoBlock(
 	refreshSecs := config.BlockedASNsFileRefreshSecs
 	if refreshSecs <= 0 {
 		refreshSecs = defaultBlockedASNsFileRefreshSecs
+	}
+
+	countriesRefreshSecs := config.CountriesFileRefreshSecs
+	if countriesRefreshSecs <= 0 {
+		countriesRefreshSecs = defaultCountriesFileRefreshSecs
 	}
 
 	return &GeoBlock{
@@ -256,12 +280,16 @@ func newGeoBlock(
 		allowUnknownASN:            config.AllowUnknownASN,
 		blockedASNsFile:            config.BlockedASNsFile,
 		blockedASNsFileRefreshSecs: refreshSecs,
+		// Country file filtering
+		countriesFile:            config.CountriesFile,
+		countriesFileRefreshSecs: countriesRefreshSecs,
 	}
 }
 
 func (a *GeoBlock) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	// check for blocked ASNs file updates
+	// check for file-based config updates
 	a.maybeRefreshBlockedASNs()
+	a.maybeRefreshCountries()
 
 	fullURL := req.Host + req.URL.Path
 	if a.isPathExcluded(fullURL) {
@@ -360,6 +388,68 @@ func (a *GeoBlock) maybeRefreshBlockedASNs() {
 		a.lastFileCheck = time.Now() // avoid retrying every request
 	} else {
 		a.infoLogger.Printf("%s: refreshed %d blocked ASNs from file", a.name, len(a.dynamicBlockedASNs))
+	}
+}
+
+// loadCountriesFile reads and parses a JSON array of country code strings from the configured file.
+func (a *GeoBlock) loadCountriesFile() error {
+	data, err := os.ReadFile(a.countriesFile)
+	if err != nil {
+		return fmt.Errorf("reading countries file: %w", err)
+	}
+
+	var countries []string
+	if err := json.Unmarshal(data, &countries); err != nil {
+		return fmt.Errorf("parsing countries file: %w", err)
+	}
+
+	if len(countries) == 0 {
+		return fmt.Errorf("countries file is empty")
+	}
+
+	a.dynamicCountries = countries
+	a.lastCountriesFileCheck = time.Now()
+	return nil
+}
+
+// getEffectiveCountries returns the dynamic file-based countries if loaded, otherwise the inline config countries.
+func (a *GeoBlock) getEffectiveCountries() []string {
+	a.countriesMu.RLock()
+	defer a.countriesMu.RUnlock()
+
+	if len(a.dynamicCountries) > 0 {
+		return a.dynamicCountries
+	}
+	return a.countries
+}
+
+// maybeRefreshCountries periodically re-reads the countries file.
+func (a *GeoBlock) maybeRefreshCountries() {
+	if len(a.countriesFile) == 0 {
+		return
+	}
+
+	a.countriesMu.RLock()
+	elapsed := time.Since(a.lastCountriesFileCheck)
+	a.countriesMu.RUnlock()
+
+	if elapsed.Seconds() < float64(a.countriesFileRefreshSecs) {
+		return
+	}
+
+	a.countriesMu.Lock()
+	defer a.countriesMu.Unlock()
+
+	// double-check after acquiring write lock
+	if time.Since(a.lastCountriesFileCheck).Seconds() < float64(a.countriesFileRefreshSecs) {
+		return
+	}
+
+	if err := a.loadCountriesFile(); err != nil {
+		a.infoLogger.Printf("%s: failed to refresh countries file: %v", a.name, err)
+		a.lastCountriesFileCheck = time.Now() // avoid retrying every request
+	} else {
+		a.infoLogger.Printf("%s: refreshed %d countries from file", a.name, len(a.dynamicCountries))
 	}
 }
 
@@ -477,8 +567,9 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 	}
 
 	// check if we are in black/white-list mode and allow/deny based on country code
+	effectiveCountries := a.getEffectiveCountries()
 	isUnknownCountry := entry.Country == unknownCountryCode
-	isCountryAllowed := stringInSlice(entry.Country, a.countries) != a.blackListMode
+	isCountryAllowed := stringInSlice(entry.Country, effectiveCountries) != a.blackListMode
 	isAllowed := isCountryAllowed || (isUnknownCountry && a.allowUnknownCountries)
 
 	if !isAllowed {
@@ -901,6 +992,10 @@ func printConfiguration(name string, config *Config, logger *log.Logger) {
 	if len(config.BlockedASNsFile) > 0 {
 		logger.Printf("%s: blocked ASNs file: %s", name, config.BlockedASNsFile)
 		logger.Printf("%s: blocked ASNs file refresh: %ds", name, config.BlockedASNsFileRefreshSecs)
+	}
+	if len(config.CountriesFile) > 0 {
+		logger.Printf("%s: countries file: %s", name, config.CountriesFile)
+		logger.Printf("%s: countries file refresh: %ds", name, config.CountriesFileRefreshSecs)
 	}
 }
 
