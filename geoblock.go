@@ -30,7 +30,7 @@ const (
 	unknownASN                         = 0
 	countryCodeLength                  = 2
 	defaultDeniedRequestHTTPStatusCode = 403
-	filePermissions                    = fs.FileMode(0666)
+	filePermissions                    = fs.FileMode(0600)
 	defaultBlockedASNsFileRefreshSecs    = 300
 	defaultCountriesFileRefreshSecs      = 300
 )
