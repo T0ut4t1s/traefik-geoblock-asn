@@ -2250,7 +2250,7 @@ func TestCountriesFileRefresh(t *testing.T) {
 	cfg.CountriesFile = tmpFile
 	cfg.CountriesFileRefreshSecs = 1 // 1 second refresh
 	cfg.API = mockServer.URL + "/{ip}.json"
-	cfg.CacheSize = 0 // disable cache so each request re-evaluates
+	cfg.CacheSize = 2 // minimum valid cache size so each request re-evaluates
 
 	ctx := context.Background()
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -2273,7 +2273,7 @@ func TestCountriesFileRefresh(t *testing.T) {
 	assertStatusCode(t, recorder.Result(), http.StatusForbidden)
 
 	// Update file to include CH
-	if err := os.WriteFile(tmpFile, []byte(`["GB", "CH"]`), 0644); err != nil {
+	if err := os.WriteFile(tmpFile, []byte(`["GB", "CH"]`), 0600); err != nil {
 		t.Fatal(err)
 	}
 
