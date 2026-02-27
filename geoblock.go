@@ -31,8 +31,8 @@ const (
 	countryCodeLength                  = 2
 	defaultDeniedRequestHTTPStatusCode = 403
 	filePermissions                    = fs.FileMode(0600)
-	defaultBlockedASNsFileRefreshSecs    = 300
-	defaultCountriesFileRefreshSecs      = 300
+	defaultBlockedASNsFileRefreshSecs  = 300
+	defaultCountriesFileRefreshSecs    = 300
 )
 
 // Config the plugin configuration.
@@ -586,12 +586,8 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 	// ASN filtering - check blocked ASNs first (file-based or inline)
 	effectiveBlockedASNs := a.getEffectiveBlockedASNs()
 	if len(effectiveBlockedASNs) > 0 && intInSlice(entry.ASN, effectiveBlockedASNs) {
-		a.infoLogger.Printf(
-			"%s: request denied [%s] for country [%s] - ASN [%d] is blocked",
-			a.name,
-			requestIPAddr,
-			entry.Country,
-			entry.ASN)
+		a.infoLogger.Printf("%s: request denied [%s] for country [%s] - ASN [%d] is blocked",
+			a.name, requestIPAddr, entry.Country, entry.ASN)
 		return false, entry.Country, entry.ASN
 	}
 
