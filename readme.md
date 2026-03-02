@@ -5,6 +5,7 @@ A [Traefik](https://github.com/traefik/traefik) middleware plugin that blocks or
 ## Features
 
 - **Country filtering**: Allow or block requests by country code (whitelist or blacklist mode)
+- **File-based country list**: Load allowed/blocked countries from a JSON file with periodic refresh
 - **ASN filtering**: Block or allow requests by ASN number to target specific ISPs, cloud providers, or organizations
 - **File-based ASN blocklist**: Load blocked ASNs from a JSON file with periodic refresh — no Traefik restart needed
 - **IP allowlisting**: Explicitly allow specific IPs or CIDR ranges
@@ -23,7 +24,7 @@ experimental:
   plugins:
     geoblock:
       moduleName: github.com/T0ut4t1s/traefik-geoblock-asn
-      version: v0.4.0
+      version: v0.5.0
 ```
 
 ### Local Plugin
@@ -73,6 +74,8 @@ http:
           countries:
             - GB
             - US
+          countriesFile: "/data/allowed-countries/allowed-countries.json"
+          countriesFileRefreshSecs: 300
           blackListMode: false
           allowUnknownCountries: false
           unknownCountryApiResponse: "nil"
@@ -83,13 +86,11 @@ http:
             - 16509  # AWS
             - 14061  # DigitalOcean
             - 24940  # Hetzner
+          blockedASNsFile: "/data/asn-blocklist/blocked-asns.json"
+          blockedASNsFileRefreshSecs: 300
           allowedASNs: []
           allowUnknownAsn: false
           addAsnHeader: true
-
-          # File-based ASN blocklist
-          blockedASNsFile: "/data/asn-blocklist/blocked-asns.json"
-          blockedASNsFileRefreshSecs: 86400
 
           # IP allowlist
           allowedIPAddresses:
@@ -125,13 +126,15 @@ spec:
       cacheSize: 25
       forceMonthlyUpdate: true
       countries:
-        - GB
+        - GB  # fallback if countriesFile not available
+      countriesFile: "/data/allowed-countries/allowed-countries.json"
+      countriesFileRefreshSecs: 300
       blackListMode: false
       allowUnknownCountries: false
       unknownCountryApiResponse: "nil"
       addCountryHeader: true
       blockedASNsFile: "/data/asn-blocklist/blocked-asns.json"
-      blockedASNsFileRefreshSecs: 86400
+      blockedASNsFileRefreshSecs: 300
       blockedASNs:
         - 16509  # AWS (fallback if file not available)
       allowedASNs: []
@@ -175,11 +178,28 @@ spec:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `countries` | []string | **required** | List of country codes (ISO 3166-1 alpha-2) |
+| `countries` | []string | | List of country codes (ISO 3166-1 alpha-2). Used as fallback when `countriesFile` is not available. At least one of `countries` or `countriesFile` is required |
+| `countriesFile` | string | | Path to a JSON file containing an array of country code strings (e.g. `["GB", "US"]`). When loaded, overrides `countries` |
+| `countriesFileRefreshSecs` | int | `300` | How often (in seconds) to re-read the countries file |
 | `blackListMode` | bool | `false` | When `false` (whitelist mode), only listed countries are allowed. When `true` (blacklist mode), listed countries are blocked |
 | `allowUnknownCountries` | bool | `false` | Allow requests from IPs with no associated country |
 | `unknownCountryApiResponse` | string | | The API response string that indicates an unknown country |
 | `addCountryHeader` | bool | `false` | Add `X-IPCountry` header to forwarded requests |
+
+#### File-Based Country List
+
+The `countriesFile` option points to a JSON file containing an array of country code strings:
+
+```json
+["GB", "US", "ZA", "JP"]
+```
+
+This allows updating the allowed country list without restarting Traefik or modifying the Middleware configuration. The plugin:
+
+1. Reads the file on startup
+2. Re-reads it periodically (controlled by `countriesFileRefreshSecs`)
+3. Falls back to inline `countries` if the file doesn't exist or is empty
+4. Is thread-safe — file reads don't block request processing
 
 ### ASN Filtering
 
@@ -209,7 +229,7 @@ This allows updating the blocked ASN list without restarting Traefik or modifyin
 3. Falls back to inline `blockedASNs` if the file doesn't exist or is empty
 4. Is thread-safe — file reads don't block request processing
 
-In Kubernetes, mount a ConfigMap as a **directory** (not `subPath`) so that kubelet can auto-update the file when the ConfigMap changes:
+In Kubernetes, mount ConfigMaps as **directories** (not `subPath`) so that kubelet can auto-update the files when ConfigMaps change:
 
 ```yaml
 # Traefik Helm values
@@ -219,10 +239,17 @@ deployment:
       configMap:
         name: asn-blocklist
         optional: true  # Traefik starts even if the ConfigMap doesn't exist yet
+    - name: allowed-countries
+      configMap:
+        name: allowed-countries
+        optional: true
 
 additionalVolumeMounts:
   - name: asn-blocklist
     mountPath: /data/asn-blocklist
+    readOnly: true
+  - name: allowed-countries
+    mountPath: /data/allowed-countries
     readOnly: true
 ```
 
