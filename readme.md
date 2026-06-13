@@ -231,6 +231,9 @@ This allows updating the blocked ASN list without restarting Traefik or modifyin
 
 #### ASN-Only Mode
 
+> **Available since v0.6.0.** Earlier versions require a country list and reject an
+> ASN-only config at startup with `no allowed country code provided`.
+
 You can run the plugin with **ASN filtering only** and no country list at all. When neither
 `countries` nor `countriesFile` is configured, country filtering is skipped entirely and the
 allow/deny decision is made purely from the ASN rules. (At least one filter — country *or* ASN —
