@@ -148,9 +148,13 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 		return nil, fmt.Errorf("no api uri given")
 	}
 
-	// check if at least one allowed country is provided (or a countries file)
-	if len(config.Countries) == 0 && len(config.CountriesFile) == 0 {
-		return nil, fmt.Errorf("no allowed country code provided")
+	// require at least one filter: country (inline or file) or ASN (allow/block/file).
+	// ASN-only configurations are valid — country filtering becomes a no-op when no
+	// countries are configured (see allowDenyCachedRequestIP).
+	hasCountryFilter := len(config.Countries) > 0 || len(config.CountriesFile) > 0
+	hasASNFilter := len(config.AllowedASNs) > 0 || len(config.BlockedASNs) > 0 || len(config.BlockedASNsFile) > 0
+	if !hasCountryFilter && !hasASNFilter {
+		return nil, fmt.Errorf("no country code or ASN filter provided")
 	}
 
 	// set default API timeout if non is given
@@ -522,6 +526,31 @@ func (a *GeoBlock) allowDenyIPAddress(requestIPAddr *net.IP, req *http.Request) 
 	return allowed
 }
 
+// countryDenied reports whether the request should be denied based on country filtering.
+// When no country filter is configured (ASN-only mode), it always returns false so that
+// ASN filtering alone decides the outcome.
+func (a *GeoBlock) countryDenied(entry ipEntry, requestIPAddr *net.IP) bool {
+	effectiveCountries := a.getEffectiveCountries()
+	if len(effectiveCountries) == 0 {
+		return false
+	}
+
+	isUnknownCountry := entry.Country == unknownCountryCode
+	isCountryAllowed := stringInSlice(entry.Country, effectiveCountries) != a.blackListMode
+	if isCountryAllowed || (isUnknownCountry && a.allowUnknownCountries) {
+		return false
+	}
+
+	reason := "country is not allowed"
+	if isUnknownCountry && !a.allowUnknownCountries {
+		reason = "unknown country"
+	}
+	a.infoLogger.Printf(
+		"%s: request denied [%s] for country [%s] ASN [%d] due to: %s",
+		a.name, requestIPAddr, entry.Country, entry.ASN, reason)
+	return true
+}
+
 func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Request) (bool, string, int) {
 	ipAddressString := requestIPAddr.String()
 	cacheEntry, cacheHit := a.database.Get(ipAddressString)
@@ -566,20 +595,8 @@ func (a *GeoBlock) allowDenyCachedRequestIP(requestIPAddr *net.IP, req *http.Req
 		}
 	}
 
-	// check if we are in black/white-list mode and allow/deny based on country code
-	effectiveCountries := a.getEffectiveCountries()
-	isUnknownCountry := entry.Country == unknownCountryCode
-	isCountryAllowed := stringInSlice(entry.Country, effectiveCountries) != a.blackListMode
-	isAllowed := isCountryAllowed || (isUnknownCountry && a.allowUnknownCountries)
-
-	if !isAllowed {
-		reason := "country is not allowed"
-		if isUnknownCountry && !a.allowUnknownCountries {
-			reason = "unknown country"
-		}
-		a.infoLogger.Printf(
-			"%s: request denied [%s] for country [%s] ASN [%d] due to: %s",
-			a.name, requestIPAddr, entry.Country, entry.ASN, reason)
+	// allow/deny based on country code (no-op in ASN-only mode, see countryDenied)
+	if a.countryDenied(entry, requestIPAddr) {
 		return false, entry.Country, entry.ASN
 	}
 

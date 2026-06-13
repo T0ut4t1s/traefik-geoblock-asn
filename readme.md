@@ -24,7 +24,7 @@ experimental:
   plugins:
     geoblock:
       moduleName: github.com/T0ut4t1s/traefik-geoblock-asn
-      version: v0.5.0
+      version: v0.6.0
 ```
 
 ### Local Plugin
@@ -178,7 +178,7 @@ spec:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `countries` | []string | | List of country codes (ISO 3166-1 alpha-2). Used as fallback when `countriesFile` is not available. At least one of `countries` or `countriesFile` is required |
+| `countries` | []string | | List of country codes (ISO 3166-1 alpha-2). Used as fallback when `countriesFile` is not available. Required **unless** an ASN filter (`blockedASNs`, `allowedASNs`, or `blockedASNsFile`) is configured — see [ASN-Only Mode](#asn-only-mode) |
 | `countriesFile` | string | | Path to a JSON file containing an array of country code strings (e.g. `["GB", "US"]`). When loaded, overrides `countries` |
 | `countriesFileRefreshSecs` | int | `300` | How often (in seconds) to re-read the countries file |
 | `blackListMode` | bool | `false` | When `false` (whitelist mode), only listed countries are allowed. When `true` (blacklist mode), listed countries are blocked |
@@ -228,6 +228,24 @@ This allows updating the blocked ASN list without restarting Traefik or modifyin
 2. Re-reads it periodically (controlled by `blockedASNsFileRefreshSecs`)
 3. Falls back to inline `blockedASNs` if the file doesn't exist or is empty
 4. Is thread-safe — file reads don't block request processing
+
+#### ASN-Only Mode
+
+You can run the plugin with **ASN filtering only** and no country list at all. When neither
+`countries` nor `countriesFile` is configured, country filtering is skipped entirely and the
+allow/deny decision is made purely from the ASN rules. (At least one filter — country *or* ASN —
+must still be present, otherwise the plugin refuses to start.)
+
+```yaml
+api: "https://get.geojs.io/v1/ip/geo/{ip}.json"  # JSON endpoint required for ASN data
+cacheSize: 25
+blackListMode: true        # optional; ASN-only works in either mode
+blockedASNs:
+  - 16509  # AWS
+  - 15169  # Google
+allowUnknownAsn: true
+# no countries / countriesFile
+```
 
 In Kubernetes, mount ConfigMaps as **directories** (not `subPath`) so that kubelet can auto-update the files when ConfigMaps change:
 
