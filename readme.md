@@ -2,6 +2,13 @@
 
 A [Traefik](https://github.com/traefik/traefik) middleware plugin that blocks or allows requests based on their country of origin and/or ASN (Autonomous System Number). Uses [GeoJS](https://www.geojs.io/) for IP geolocation and ASN lookups.
 
+> **HTTP routers only.** Traefik's plugin system supports HTTP middleware and providers;
+> there is no TCP plugin interface, so this plugin cannot be used in `tcp.middlewares`.
+> Attempting it fails at config parse time with
+> `Error occurred during watcher callback error="field not found, node: plugin"`.
+> The TCP middlewares shown in the Traefik dashboard are the built-ins only
+> (`ipAllowList`, `inFlightConn`), and that set is not plugin-extensible.
+
 ## Features
 
 - **Country filtering**: Allow or block requests by country code (whitelist or blacklist mode)
